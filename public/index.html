@@ -326,7 +326,7 @@ function updateMemory(botResponse, userMsg) {
   // Topics surfaced
   if(b.includes('ankle') || b.includes('knee') || b.includes('injur') || u.includes('injur')) established.injuries = true;
   if(b.includes('consultant') || b.includes('consultancy') || b.includes('work') || b.includes('job') || b.includes('slide deck')) established.jobConfirmed = true;
-  if(b.includes('group medical') || b.includes('company plan') || b.includes('doesn't cover') || b.includes('no sports cover')) established.insuranceGap = true;
+  if(b.includes('group medical') || b.includes('company plan') || b.includes('doesn\'t cover') || b.includes('no sports cover')) established.insuranceGap = true;
   if(b.includes('friend') && (b.includes('ski') || b.includes('japan') || b.includes('injured'))) established.friendStory = true;
   if(u.includes('how much') || u.includes('price') || u.includes('cost') || u.includes('premium')) established.priceAsked = true;
   if(u.includes('cover') && currentStage === 3) established.coverageAsked.push(userMsg.slice(0,60));
@@ -341,16 +341,12 @@ function buildMemoryContext() {
   if(established.injuries) lines.push('Injuries have already been discussed. Do not re-ask about injuries.');
   if(established.jobConfirmed) lines.push('His job/work situation has already been established. Do not ask again.');
   if(established.insuranceGap) lines.push('The insurance coverage gap has already been surfaced. Do not re-explain it — build on it.');
-  if(established.friendStory) lines.push('The friend's skiing accident story has already come up. Do not re-introduce it.');
+  if(established.friendStory) lines.push('The friend\'s skiing accident story has already come up. Do not re-introduce it.');
   if(established.priceAsked) lines.push('He has already asked about price. If price was answered, do not ask "how much" again — only follow up if the answer was unsatisfying.');
   if(established.coverageAsked.length > 0) lines.push(`Coverage questions already asked: ${established.coverageAsked.slice(-3).join(' / ')}. Do not repeat these.`);
-  if(established.freebieOffered) lines.push('A free trial or complimentary offer has been made. He is more open now — this swayed him positively even if he didn't say so explicitly.');
+  if(established.freebieOffered) lines.push('A free trial or complimentary offer has been made. He is more open now — this swayed him positively even if he didn\'t say so explicitly.');
   if(lines.length === 0) return '';
-  return '
-
-WHAT HAS ALREADY BEEN ESTABLISHED IN THIS CONVERSATION (do not re-ask or re-introduce any of these):
-' + lines.map(l => '- ' + l).join('
-');
+  return '\n\nWHAT HAS ALREADY BEEN ESTABLISHED IN THIS CONVERSATION (do not re-ask or re-introduce any of these):\n' + lines.map(l => '- ' + l).join('\n');
 }
 
 const STAGE_MAX_TURNS   = {1:2, 2:5, 3:7};
