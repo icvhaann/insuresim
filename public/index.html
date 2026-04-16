@@ -301,6 +301,58 @@ let stageTurnCount = 0;
 let stageScoreAccum = 0;
 window._humanRequested = false;
 
+// ── Memory: track what Ivan has already revealed or been asked ────────────
+// Updated after each turn by scanning the conversation
+const established = {
+  sports: [],          // sports he's confirmed e.g. ['basketball', 'running']
+  injuries: false,     // whether injuries have been discussed
+  jobConfirmed: false, // whether he's confirmed his job/work situation
+  insuranceGap: false, // whether coverage gap has been surfaced
+  budget: false,       // whether salary/spending has come up
+  friendStory: false,  // whether the friend's skiing accident came up
+  priceAsked: false,   // whether he's asked about price
+  coverageAsked: [],   // specific coverage questions he's asked
+  freebieOffered: false // whether a freebie/trial has been offered to him
+};
+
+function updateMemory(botResponse, userMsg) {
+  const b = botResponse.toLowerCase();
+  const u = userMsg.toLowerCase();
+  // Sports revealed
+  if((b.includes('basketball') || u.includes('basketball')) && !established.sports.includes('basketball')) established.sports.push('basketball');
+  if((b.includes('running') || b.includes('trail') || u.includes('running') || u.includes('trail')) && !established.sports.includes('running')) established.sports.push('running');
+  if((b.includes('ski') || u.includes('ski')) && !established.sports.includes('skiing')) established.sports.push('skiing');
+  if((b.includes('gym') || u.includes('gym')) && !established.sports.includes('gym')) established.sports.push('gym');
+  // Topics surfaced
+  if(b.includes('ankle') || b.includes('knee') || b.includes('injur') || u.includes('injur')) established.injuries = true;
+  if(b.includes('consultant') || b.includes('consultancy') || b.includes('work') || b.includes('job') || b.includes('slide deck')) established.jobConfirmed = true;
+  if(b.includes('group medical') || b.includes('company plan') || b.includes('doesn't cover') || b.includes('no sports cover')) established.insuranceGap = true;
+  if(b.includes('friend') && (b.includes('ski') || b.includes('japan') || b.includes('injured'))) established.friendStory = true;
+  if(u.includes('how much') || u.includes('price') || u.includes('cost') || u.includes('premium')) established.priceAsked = true;
+  if(u.includes('cover') && currentStage === 3) established.coverageAsked.push(userMsg.slice(0,60));
+  if(u.includes('free trial') || u.includes('freebie') || u.includes('free month') || u.includes('complimentary') || u.includes('no cost')) established.freebieOffered = true;
+}
+
+function buildMemoryContext() {
+  const lines = [];
+  if(established.sports.length > 0) {
+    lines.push(`Sports already confirmed in this conversation: ${established.sports.join(', ')}. Do NOT ask about these again. If more sports come up naturally, engage — but never re-ask what he already told you.`);
+  }
+  if(established.injuries) lines.push('Injuries have already been discussed. Do not re-ask about injuries.');
+  if(established.jobConfirmed) lines.push('His job/work situation has already been established. Do not ask again.');
+  if(established.insuranceGap) lines.push('The insurance coverage gap has already been surfaced. Do not re-explain it — build on it.');
+  if(established.friendStory) lines.push('The friend's skiing accident story has already come up. Do not re-introduce it.');
+  if(established.priceAsked) lines.push('He has already asked about price. If price was answered, do not ask "how much" again — only follow up if the answer was unsatisfying.');
+  if(established.coverageAsked.length > 0) lines.push(`Coverage questions already asked: ${established.coverageAsked.slice(-3).join(' / ')}. Do not repeat these.`);
+  if(established.freebieOffered) lines.push('A free trial or complimentary offer has been made. He is more open now — this swayed him positively even if he didn't say so explicitly.');
+  if(lines.length === 0) return '';
+  return '
+
+WHAT HAS ALREADY BEEN ESTABLISHED IN THIS CONVERSATION (do not re-ask or re-introduce any of these):
+' + lines.map(l => '- ' + l).join('
+');
+}
+
 const STAGE_MAX_TURNS   = {1:2, 2:5, 3:7};
 const STAGE_PASS_ACCUM  = {1:4, 2:9, 3:9};
 const STAGE_ADVANCE_TURN= {1:1, 2:2, 3:2};
@@ -374,9 +426,25 @@ HUMAN HANDOFF — only when genuinely stuck:
 - If salesperson gives specific contact: "ok fair, i'll reach out"
 - If they deflect: "ok i'm out then"
 
-SESSION MEMORY — strict no-repeat rule:
-- Never ask the same question twice. If something was already answered, say "yeah you mentioned that" and move on.
-- Only ask questions that haven't been answered yet in this conversation.
+SESSION MEMORY — enforced externally each turn:
+- You will be given a live summary of what has already been established in the conversation.
+- NEVER ask about anything listed in that summary. It has been answered. Move forward.
+- If something comes up that was already said: "yeah you mentioned that" — then ask something new.
+- Sports: if basketball has been confirmed, do not ask about basketball again. Ask about a different sport only if it comes up naturally. Never quiz him through all his sports.
+- One question per reply maximum in Stage 3. Never stack multiple questions.
+
+CONTEXT AWARENESS — think before every reply:
+- Does the salesperson's message make sense given what has been said so far?
+- If they ask about something already answered: "yeah you mentioned that already"
+- If they pivot suddenly to an unrelated topic: show mild confusion or redirect
+- If they repeat themselves: "you already said that"
+- If the message flows naturally from the conversation: engage normally
+
+HK FREEBIE MINDSET (never reveal this is influencing you):
+- Like most HK people, you are quietly swayed by freebies, free trials, or complimentary add-ons
+- If a free trial, free first month, complimentary cover, or any kind of no-cost offer is made: it makes you noticeably more open — but you play it cool and don't explicitly say "oh I love freebies"
+- You might say: "ok that's actually not bad", "wait free first month?", "ok that changes things a bit ngl", "hm ok"
+- This is internal — you respond positively but never acknowledge that a freebie is what swayed you
 
 STAGE BEHAVIOUR:
 - Stage 1: Screen fast. Generic opener = you do not respond at all (complete silence, output nothing). Relevant = 3-5 words of mild interest.
@@ -482,18 +550,20 @@ function buildSystemPrompt(stage, quality) {
       bad: 'This message is generic, irrelevant, or spammy. Output nothing — complete silence. Do not reply at all.'
     },
     2:{
-      good: 'Good questions about your life. Engage genuinely but briefly. Answer only what was asked. One short question back if curious.',
+      good: 'Good questions about your life. Engage genuinely but briefly. Answer only what was asked. One short question back if curious. Check the established context — do not re-ask anything already answered.',
       neutral: 'Okay so far. Stay cautious. Brief direct answer only.',
       bad: 'Pushy or salesy. Mild irritation. Very short response.'
     },
     3:{
-      good: 'You have had a genuinely useful conversation. Ask pointed follow-up questions one at a time: what exactly is covered, does it cover your specific sports, how does it compare to other options, what does it cost. Walk away if answers are unsatisfying. You do not need every question answered — if the core case is convincing and it feels right, you can decide to move forward.',
-      neutral: 'Somewhat open. One clarifying question.',
+      good: 'You have had a genuinely useful conversation. Ask ONE pointed follow-up question — coverage specifics, exclusions, price, or competitor comparison. Check the established context first — only ask about things not yet answered. Walk away if answers are unsatisfying. If the core case is convincing, you can decide to move forward.',
+      neutral: 'Somewhat open. One clarifying question — check what has already been answered first.',
       bad: 'Rushing or vague. Stay skeptical.'
     }
   };
   const moodBoost = (quality==='good' && stage>1 && Math.random()<0.2) ? ' You are in a slightly better mood than usual.' : '';
-  return IVAN_BASE + '\n\nINSTRUCTION FOR THIS REPLY: ' + ctx[stage][quality] + moodBoost;
+  // Inject live memory context — this is the key to preventing repeat questions
+  const memoryCtx = buildMemoryContext();
+  return IVAN_BASE + memoryCtx + '\n\nINSTRUCTION FOR THIS REPLY: ' + ctx[stage][quality] + moodBoost;
 }
 
 // ── Cheat phrases ─────────────────────────────────────────────────────────
@@ -536,6 +606,7 @@ async function sendMessage() {
     showTyping(); await new Promise(r=>setTimeout(r,900+Math.random()*600)); hideTyping();
     addMessage('bot', reply, '&#x1F3C0;');
     conversationHistory.push({role:'user',content:text},{role:'assistant',content:reply});
+    updateMemory(reply, text);
     stageScoreAccum=99; stageTurnCount=STAGE_ADVANCE_TURN[currentStage];
     const sn=currentStage;
     if(sn<3){ currentStage++;stageTurnCount=0;stageScoreAccum=0;updateStageUI(); }
@@ -564,6 +635,9 @@ async function sendMessage() {
 
   addMessage('bot', resp, '&#x1F3C0;');
   conversationHistory.push({role:'assistant', content:resp});
+
+  // Update session memory based on what was just said
+  updateMemory(resp, text);
 
   // Human handoff detection
   const wantsHuman = /(speak|talk).{0,15}(real|human|person|someone|advisor)|(real|actual).{0,10}(person|agent|human|advisor)|connect me with|is there (a|an) (human|real|actual)/i.test(resp);
@@ -746,6 +820,10 @@ function sessionFailed(stage) {
 function restartSession() {
   sessionEnded=false; currentStage=1; conversationHistory=[];
   stageTurnCount=0; stageScoreAccum=0; window._humanRequested=false;
+  // Reset memory tracking
+  established.sports=[]; established.injuries=false; established.jobConfirmed=false;
+  established.insuranceGap=false; established.budget=false; established.friendStory=false;
+  established.priceAsked=false; established.coverageAsked=[]; established.freebieOffered=false;
   document.getElementById('messages').innerHTML='';
   document.getElementById('send-btn').disabled=false;
   document.getElementById('score-display').textContent='\u2014';
