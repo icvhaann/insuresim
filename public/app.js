@@ -1,0 +1,653 @@
+// app.js
+// Client-side logic for InsureSim v2.
+// All prompt construction lives on the server. This file only manages state, UI, and HTTP.
+
+'use strict';
+
+// ── DOM refs ───────────────────────────────────────────────
+const splash         = document.getElementById('splash');
+const splashStart    = document.getElementById('splash-start');
+const messagesEl     = document.getElementById('messages');
+const inputEl        = document.getElementById('msg-input');
+const sendBtn        = document.getElementById('send-btn');
+const stageBadge     = document.getElementById('stage-badge');
+const stageLblTop    = document.getElementById('stage-lbl-top');
+const stageDisplay   = document.getElementById('stage-display');
+const scoreAvgEl     = document.getElementById('score-avg');
+const scoreCumEl     = document.getElementById('score-cumulative');
+const scoreBarEl     = document.getElementById('score-bar');
+const ignoreCountEl  = document.getElementById('ignore-counter');
+const sidebar        = document.getElementById('sidebar');
+const sidebarToggle  = document.getElementById('sidebar-toggle');
+const sidebarOverlay = document.getElementById('sidebar-overlay');
+const pip = id => document.getElementById(id);
+
+// ── Config ─────────────────────────────────────────────────
+const STAGE_MAX_TURNS    = { 1: 5,  2: 8,  3: 10 };
+const STAGE_PASS_ACCUM   = { 1: 14, 2: 22, 3: 24 };
+const STAGE_ADVANCE_TURN = { 1: 3,  2: 4,  3: 5  };
+const STAGE_LABELS       = { 1: 'Hook', 2: 'Cultivate', 3: 'Convert' };
+const MAX_IGNORES        = 3;
+
+// ── State ──────────────────────────────────────────────────
+let sessionId, currentStage, history, transcript;
+let psych, memory;
+let stageTurnCount, stageScoreAccum, perStageScores;
+let totalTurns, consecutiveIgnores;
+let sessionEnded, insuranceMentionTurn;
+
+resetState();
+
+function resetState() {
+  sessionId = `s_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+  currentStage = 1;
+  history = [];
+  transcript = [];
+  psych = { trust: 50, skepticism: 38, creepiness: 0, engagement: 15, scamSuspicion: 0 };
+  memory = {
+    sports: [], injuries: false, jobConfirmed: false, insuranceGap: false,
+    friendStory: false, priceAsked: false, coverageAsked: [],
+    freebieOffered: false, legitimacyChallenged: false
+  };
+  stageTurnCount = 0;
+  stageScoreAccum = 0;
+  perStageScores = [];
+  totalTurns = 0;
+  consecutiveIgnores = 0;
+  sessionEnded = false;
+  insuranceMentionTurn = null;
+}
+
+// ── Sidebar toggle ─────────────────────────────────────────
+sidebarToggle.addEventListener('click', () => {
+  if (window.innerWidth <= 640) {
+    sidebar.classList.toggle('open');
+    sidebarOverlay.classList.toggle('visible');
+  } else {
+    sidebar.classList.toggle('collapsed');
+  }
+});
+sidebarOverlay.addEventListener('click', () => {
+  sidebar.classList.remove('open');
+  sidebarOverlay.classList.remove('visible');
+});
+
+// ── Splash → start session ─────────────────────────────────
+splashStart.addEventListener('click', startSession);
+
+async function startSession() {
+  splash.style.opacity = '0';
+  setTimeout(() => { splash.style.display = 'none'; }, 400);
+  try {
+    const r = await fetch('/api/session/start', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ sessionId })
+    });
+    const data = await r.json();
+    if (data?.initialPsych) psych = { ...psych, ...data.initialPsych };
+  } catch (e) {
+    console.error('Session start failed:', e);
+  }
+  fetch('/api/warmup').catch(() => {});
+  pip('pip1').classList.add('active');
+  inputEl.focus();
+}
+
+// ── Send ────────────────────────────────────────────────────
+sendBtn.addEventListener('click', sendMessage);
+inputEl.addEventListener('keydown', e => {
+  if (e.key === 'Enter' && !e.shiftKey) {
+    e.preventDefault();
+    sendMessage();
+  }
+});
+
+async function sendMessage() {
+  if (sessionEnded) return;
+  const text = inputEl.value.trim();
+  if (!text) return;
+  if (text.length > 2000) {
+    showSystemMsg('Message too long (max 2000 chars).');
+    return;
+  }
+
+  inputEl.value = '';
+  inputEl.disabled = true;
+  sendBtn.disabled = true;
+
+  addMessageBubble('user', text);
+  history.push({ role: 'user', content: text });
+  transcript.push({ role: 'seller', content: text });
+
+  const typing = addTypingIndicator();
+
+  let resp;
+  try {
+    const r = await fetch('/api/chat', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        sessionId,
+        stage: currentStage,
+        userMessage: text,
+        history,
+        psych,
+        memory,
+        totalTurns,
+        insuranceMentionTurn
+      })
+    });
+    if (r.status === 429) {
+      typing.remove();
+      showSystemMsg('Slow down — try again in a moment.');
+      reEnableInput();
+      return;
+    }
+    if (!r.ok) {
+      typing.remove();
+      showSystemMsg('Something went wrong on the server. Try again.');
+      reEnableInput();
+      return;
+    }
+    resp = await r.json();
+  } catch (e) {
+    typing.remove();
+    showSystemMsg('Network error. Try again.');
+    reEnableInput();
+    return;
+  }
+  typing.remove();
+
+  totalTurns += 1;
+  stageTurnCount += 1;
+
+  updateMemoryFromUser(text);
+  if (resp.insuranceMention && !insuranceMentionTurn) insuranceMentionTurn = totalTurns;
+
+  updatePsychFromSignals(resp);
+
+  // ── Walk-away ──────────────────────────────────────────
+  if (resp.walked) {
+    if (resp.walkPresentation === 'cold_reply' && resp.reply) {
+      addMessageBubble('bot', resp.reply);
+      history.push({ role: 'assistant', content: resp.reply });
+      transcript.push({ role: 'ivan', content: resp.reply });
+      await sleep(900);
+    }
+    return endSessionWith('walked', 'Ivan walked away — insurance came up too early in the conversation.');
+  }
+
+  // ── Ignored ────────────────────────────────────────────
+  if (resp.ignored || resp.reply === null) {
+    consecutiveIgnores += 1;
+    addReadIgnoredHint();
+    updateIgnoreCounter();
+    if (consecutiveIgnores >= MAX_IGNORES) {
+      return endSessionWith('failed_ignored', `Ivan stopped responding after ${MAX_IGNORES} ignored messages.`);
+    }
+    addStageScore(resp.score ?? 2);
+    updateScorePanel();
+    reEnableInput();
+    checkStageProgression();
+    return;
+  }
+
+  // ── Normal reply ────────────────────────────────────────
+  consecutiveIgnores = 0;
+  updateIgnoreCounter();
+  addMessageBubble('bot', resp.reply);
+  history.push({ role: 'assistant', content: resp.reply });
+  transcript.push({ role: 'ivan', content: resp.reply });
+
+  addStageScore(resp.score ?? 5);
+  updateScorePanel();
+
+  // ── Outcome detection from Ivan's reply ──
+  if (resp.optOut) {
+    return endSessionWith('failed_optout', 'Ivan asked to be removed from contact.');
+  }
+  if (resp.legitimacy?.type === 'human_handoff' && currentStage === 3 && psych.trust >= 55) {
+    return endSessionWith('success', 'Ivan asked to be connected with an agent — the hand-off succeeded.');
+  }
+
+  reEnableInput();
+  checkStageProgression();
+}
+
+// ── Memory updates ─────────────────────────────────────────
+function updateMemoryFromUser(text) {
+  const m = text.toLowerCase();
+  if (/\b(sport|active|workout|fit|exercise|gym)\b/.test(m) && !memory.sports.includes('general fitness')) memory.sports.push('general fitness');
+  if (/\b(basketball|hoops|nba)\b/.test(m) && !memory.sports.includes('basketball'))                       memory.sports.push('basketball');
+  if (/\b(ski|snowboard)\b/.test(m) && !memory.sports.includes('skiing'))                                  memory.sports.push('skiing');
+  if (/\b(run|jog|trail)\b/.test(m) && !memory.sports.includes('running'))                                 memory.sports.push('running');
+  if (/\b(injur|sprain|hurt|knee|ankle|broken|broke)\b/.test(m))                                           memory.injuries = true;
+  if (/\b(consultant|consulting|finance|tech|job|work|career|central)\b/.test(m))                          memory.jobConfirmed = true;
+  if (/\b(coverage|cover|insurance|protect|gap|policy)\b/.test(m))                                         memory.insuranceGap = true;
+  if (/\b(price|cost|hkd|month|premium)\b/.test(m))                                                        memory.priceAsked = true;
+  if (/\b(exclude|exclusion|claim|payout|compare)\b/.test(m))                                              memory.coverageAsked.push(m.slice(0, 50));
+  if (/\b(free|complimentary|no\s*cost|no\s*charge|trial|on\s*us|waive)\b/.test(m))                        memory.freebieOffered = true;
+}
+
+// ── Psych updates from server signals ──────────────────────
+function updatePsychFromSignals(resp) {
+  const q  = resp.quality || 'neutral';
+  const sb = !!resp.severeBreach;
+  const pr = resp.privateRefs?.length || 0;
+  const cq = resp.confirmingQ?.length || 0;
+  const inMention = resp.insuranceMention;
+
+  if (q === 'good')    { psych.trust += 4; psych.engagement += 5; psych.skepticism -= 3; }
+  if (q === 'neutral') { psych.engagement += 1; }
+  if (q === 'bad')     { psych.trust -= 3; psych.engagement -= 4; psych.skepticism += 4; }
+
+  if (sb) { psych.trust -= 35; psych.creepiness += 50; psych.skepticism += 25; }
+  if (pr) { psych.creepiness += 10 * pr; psych.trust -= 4 * pr; }
+  if (cq) { psych.creepiness += 8 * cq;  psych.skepticism += 4 * cq; }
+
+  if (inMention && currentStage <= 2) { psych.skepticism += 8; psych.engagement -= 6; }
+
+  if (memory.freebieOffered) psych.engagement = clamp(psych.engagement + 2, 0, 100);
+
+  if (resp.legitimacy?.type) memory.legitimacyChallenged = true;
+
+  // Mild creepiness decay when seller does well
+  if (q === 'good' && psych.creepiness > 30) psych.creepiness -= 3;
+
+  psych.trust         = clamp(psych.trust, 0, 100);
+  psych.skepticism    = clamp(psych.skepticism, 0, 100);
+  psych.creepiness    = clamp(psych.creepiness, 0, 100);
+  psych.engagement    = clamp(psych.engagement, 0, 100);
+  psych.scamSuspicion = clamp(psych.scamSuspicion, 0, 100);
+}
+
+const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+
+// ── Score panel + stage progression ────────────────────────
+function addStageScore(score) {
+  stageScoreAccum += score;
+}
+
+function updateScorePanel() {
+  const avg = stageTurnCount > 0 ? (stageScoreAccum / stageTurnCount).toFixed(1) : '\u2014';
+  const needed = STAGE_PASS_ACCUM[currentStage] || 24;
+  scoreAvgEl.textContent = avg;
+  scoreCumEl.textContent = `${stageScoreAccum} / ${needed}`;
+  const pct = Math.min(100, Math.round((stageScoreAccum / needed) * 100));
+  scoreBarEl.style.width = pct + '%';
+  if (avg !== '\u2014') {
+    const a = parseFloat(avg);
+    if (a >= 7)      scoreBarEl.style.background = 'var(--accent2)';
+    else if (a >= 5) scoreBarEl.style.background = 'var(--accent)';
+    else             scoreBarEl.style.background = 'var(--warn)';
+  }
+  stageDisplay.textContent = `Stage ${currentStage} / 3`;
+}
+
+function checkStageProgression() {
+  const minTurns = STAGE_ADVANCE_TURN[currentStage];
+  const needed = STAGE_PASS_ACCUM[currentStage];
+  const maxTurns = STAGE_MAX_TURNS[currentStage];
+
+  if (stageTurnCount >= minTurns && stageScoreAccum >= needed) {
+    advanceStage();
+    return;
+  }
+  if (stageTurnCount >= maxTurns) {
+    if (stageScoreAccum >= needed * 0.7) {
+      advanceStage();
+    } else {
+      endSessionWith('failed_stage', `Stage ${currentStage} ended without enough engagement to advance.`);
+    }
+  }
+}
+
+function advanceStage() {
+  perStageScores.push({
+    stage: currentStage,
+    avg: parseFloat((stageScoreAccum / stageTurnCount).toFixed(1)),
+    total: stageScoreAccum,
+    turns: stageTurnCount
+  });
+
+  if (currentStage === 3) {
+    return endSessionWith('success', 'You completed all three stages with strong engagement.');
+  }
+
+  pip(`pip${currentStage}`).classList.remove('active');
+  pip(`pip${currentStage}`).classList.add('done');
+  currentStage += 1;
+  pip(`pip${currentStage}`).classList.add('active');
+
+  stageTurnCount = 0;
+  stageScoreAccum = 0;
+
+  stageLblTop.textContent = `Stage ${currentStage} \u00b7 ${STAGE_LABELS[currentStage]}`;
+  stageBadge.textContent  = `Stage ${currentStage} \u00b7 ${STAGE_LABELS[currentStage]}`;
+  stageBadge.className    = `stage-badge s${currentStage}`;
+
+  showSystemMsg(`Advanced to Stage ${currentStage}: ${STAGE_LABELS[currentStage]}`);
+  updateScorePanel();
+}
+
+// ── End session + debrief ──────────────────────────────────
+async function endSessionWith(outcome, summary) {
+  if (sessionEnded) return;
+  sessionEnded = true;
+  inputEl.disabled = true;
+  sendBtn.disabled = true;
+
+  if (stageTurnCount > 0) {
+    perStageScores.push({
+      stage: currentStage,
+      avg: parseFloat((stageScoreAccum / stageTurnCount).toFixed(1)),
+      total: stageScoreAccum,
+      turns: stageTurnCount
+    });
+  }
+
+  try {
+    await fetch('/api/session/end', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        sessionId, outcome,
+        finalState: { stage: currentStage, psych, memory, totalTurns, insuranceMentionTurn }
+      })
+    });
+  } catch {}
+
+  showInterimEnd(outcome, summary);
+
+  let debrief = null;
+  try {
+    const r = await fetch('/api/session/debrief', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ sessionId, transcript, stageScores: perStageScores, outcome })
+    });
+    if (r.ok) debrief = await r.json();
+  } catch {}
+
+  showDebriefOverlay(outcome, summary, debrief);
+}
+
+function outcomeTitle(o) {
+  return ({
+    success:         'Closed \u2014 link / agent requested',
+    walked:          'Ivan walked away',
+    failed_optout:   'Ivan asked to opt out',
+    failed_ignored:  'Ivan stopped responding',
+    failed_stage:    'Stage failed'
+  })[o] || 'Session ended';
+}
+
+function outcomeIcon(o) {
+  return o === 'success' ? '\u2713' : o === 'walked' ? '\u2717' : '!';
+}
+
+function showInterimEnd(outcome, summary) {
+  const overlay = document.createElement('div');
+  overlay.className = 'end-overlay';
+  overlay.id = 'interim-overlay';
+  const icon = document.createElement('div');
+  icon.className = 'end-icon';
+  icon.textContent = outcomeIcon(outcome);
+  const title = document.createElement('div');
+  title.className = 'end-title';
+  title.textContent = outcomeTitle(outcome);
+  const sub = document.createElement('div');
+  sub.className = 'end-sub';
+  sub.textContent = `${summary}\n\nGenerating debrief\u2026`;
+  overlay.append(icon, title, sub);
+  messagesEl.appendChild(overlay);
+  scrollToBottom();
+}
+
+function showDebriefOverlay(outcome, summary, debrief) {
+  const interim = document.getElementById('interim-overlay');
+  if (interim) interim.remove();
+
+  const overlay = document.createElement('div');
+  overlay.className = 'end-overlay';
+
+  const icon = document.createElement('div');
+  icon.className = 'end-icon';
+  icon.textContent = outcomeIcon(outcome);
+  const title = document.createElement('div');
+  title.className = 'end-title';
+  title.textContent = outcomeTitle(outcome);
+  const sub = document.createElement('div');
+  sub.className = 'end-sub';
+  sub.textContent = summary;
+  overlay.append(icon, title, sub);
+
+  if (perStageScores.length > 0) {
+    overlay.appendChild(makeSection('Per-stage scorecard', () => {
+      const wrap = document.createElement('div');
+      perStageScores.forEach(s => {
+        const row = document.createElement('div');
+        row.className = 'debrief-stage-row';
+        const name = document.createElement('div');
+        name.className = 'stage-name';
+        name.textContent = `Stage ${s.stage}`;
+        const score = document.createElement('div');
+        score.className = 'stage-score';
+        score.textContent = `avg ${s.avg.toFixed(1)} \u00b7 ${s.turns} turns`;
+        row.append(name, score);
+        wrap.appendChild(row);
+      });
+      return wrap;
+    }));
+  }
+
+  if (debrief?.transition && debrief.transition.score != null) {
+    overlay.appendChild(makeSection('Transition naturalness (hook \u2192 insurance)', () => {
+      const wrap = document.createElement('div');
+      wrap.className = 'debrief-transition';
+      const score = document.createElement('div');
+      score.className = 'ts-score';
+      score.textContent = `${debrief.transition.score}/10`;
+      const rationale = document.createElement('div');
+      rationale.className = 'ts-rationale';
+      rationale.textContent = debrief.transition.rationale || '';
+      wrap.append(score, rationale);
+      return wrap;
+    }));
+  }
+
+  if (debrief?.keyMoments?.length) {
+    overlay.appendChild(makeSection('Key moments', () => {
+      const wrap = document.createElement('div');
+      debrief.keyMoments.forEach(m => {
+        const block = document.createElement('div');
+        block.className = 'debrief-moment';
+        const h = document.createElement('div');
+        h.className = 'm-headline';
+        h.textContent = `Turn ${m.turn} \u2014 ${m.headline || ''}`;
+        const w = document.createElement('div');
+        w.className = 'm-what';
+        w.textContent = m.what_happened || '';
+        const l = document.createElement('div');
+        l.className = 'm-lesson';
+        l.textContent = m.lesson || '';
+        block.append(h, w, l);
+        wrap.appendChild(block);
+      });
+      return wrap;
+    }));
+  }
+
+  if (debrief?.archetype) {
+    overlay.appendChild(makeSection('Persona this session', () => {
+      const wrap = document.createElement('div');
+      wrap.className = 'debrief-archetype';
+      const name = document.createElement('div');
+      name.className = 'a-name';
+      name.textContent = debrief.archetype.name;
+      const desc = document.createElement('div');
+      desc.className = 'a-desc';
+      desc.textContent = debrief.archetype.description;
+      wrap.append(name, desc);
+      return wrap;
+    }));
+  }
+
+  if (debrief?.exemplarBridge) {
+    overlay.appendChild(makeSection('How a strong bridge could have read', () => {
+      const wrap = document.createElement('div');
+      wrap.className = 'debrief-exemplar';
+      wrap.textContent = debrief.exemplarBridge;
+      return wrap;
+    }));
+  }
+
+  const actions = document.createElement('div');
+  actions.className = 'debrief-actions';
+  const dl = document.createElement('button');
+  dl.className = 'download-btn';
+  dl.textContent = '\u2193 Download log';
+  dl.addEventListener('click', downloadLog);
+  const restart = document.createElement('button');
+  restart.className = 'restart-btn';
+  restart.textContent = 'Start a new session';
+  restart.addEventListener('click', restartSession);
+  actions.append(dl, restart);
+  overlay.appendChild(actions);
+
+  messagesEl.appendChild(overlay);
+  scrollToBottom();
+}
+
+function makeSection(heading, contentFn) {
+  const sec = document.createElement('div');
+  sec.className = 'debrief-section';
+  const h = document.createElement('div');
+  h.className = 'debrief-h';
+  h.textContent = heading;
+  sec.appendChild(h);
+  sec.appendChild(contentFn());
+  return sec;
+}
+
+// ── Restart ────────────────────────────────────────────────
+function restartSession() {
+  while (messagesEl.firstChild) messagesEl.removeChild(messagesEl.firstChild);
+  pip('pip1').className = 'stage-pip';
+  pip('pip2').className = 'stage-pip';
+  pip('pip3').className = 'stage-pip';
+  resetState();
+  stageBadge.textContent = 'Stage 1 \u00b7 Hook';
+  stageBadge.className = 'stage-badge s1';
+  stageLblTop.textContent = 'Stage 1 \u00b7 Hook';
+  stageDisplay.textContent = 'Stage 1 / 3';
+  scoreAvgEl.textContent = '\u2014';
+  scoreCumEl.textContent = '\u2014';
+  scoreBarEl.style.width = '0%';
+  ignoreCountEl.classList.remove('visible');
+  inputEl.disabled = false;
+  sendBtn.disabled = false;
+  inputEl.value = '';
+  startSession();
+}
+
+// ── Download log ───────────────────────────────────────────
+function downloadLog() {
+  const log = {
+    sessionId,
+    finishedAt: new Date().toISOString(),
+    stage: currentStage,
+    totalTurns,
+    perStageScores,
+    finalPsych: psych,
+    memory,
+    transcript
+  };
+  const blob = new Blob([JSON.stringify(log, null, 2)], { type: 'application/json' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `insuresim-${sessionId}.json`;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+}
+
+// ── DOM helpers ────────────────────────────────────────────
+function addMessageBubble(side, text) {
+  const wrap = document.createElement('div');
+  wrap.className = `msg ${side === 'bot' ? 'bot' : 'user'}`;
+  const av = document.createElement('div');
+  av.className = 'msg-av';
+  av.textContent = side === 'bot' ? '\uD83C\uDFC0' : '\uD83D\uDC64';
+  const body = document.createElement('div');
+  body.className = 'msg-body';
+  const bubble = document.createElement('div');
+  bubble.className = 'msg-bubble';
+  bubble.textContent = text;
+  body.appendChild(bubble);
+  wrap.append(av, body);
+  messagesEl.appendChild(wrap);
+  scrollToBottom();
+}
+
+function addReadIgnoredHint() {
+  const hint = document.createElement('div');
+  hint.className = 'read-ignored-hint';
+  const t = new Date();
+  hint.textContent = `Read ${String(t.getHours()).padStart(2,'0')}:${String(t.getMinutes()).padStart(2,'0')} \u00b7 No reply`;
+  messagesEl.appendChild(hint);
+  scrollToBottom();
+}
+
+function addTypingIndicator() {
+  const wrap = document.createElement('div');
+  wrap.className = 'msg bot';
+  const av = document.createElement('div');
+  av.className = 'msg-av';
+  av.textContent = '\uD83C\uDFC0';
+  const body = document.createElement('div');
+  body.className = 'msg-body';
+  const bubble = document.createElement('div');
+  bubble.className = 'msg-bubble';
+  const typing = document.createElement('div');
+  typing.className = 'typing';
+  for (let i = 0; i < 3; i++) typing.appendChild(document.createElement('span'));
+  bubble.appendChild(typing);
+  body.appendChild(bubble);
+  wrap.append(av, body);
+  messagesEl.appendChild(wrap);
+  scrollToBottom();
+  return wrap;
+}
+
+function showSystemMsg(text) {
+  const hint = document.createElement('div');
+  hint.className = 'read-ignored-hint';
+  hint.textContent = text;
+  messagesEl.appendChild(hint);
+  scrollToBottom();
+}
+
+function updateIgnoreCounter() {
+  if (consecutiveIgnores > 0) {
+    ignoreCountEl.classList.add('visible');
+    ignoreCountEl.textContent = `\uD83D\uDCED ${consecutiveIgnores}/${MAX_IGNORES} ignored`;
+  } else {
+    ignoreCountEl.classList.remove('visible');
+  }
+}
+
+function reEnableInput() {
+  if (sessionEnded) return;
+  inputEl.disabled = false;
+  sendBtn.disabled = false;
+  inputEl.focus();
+}
+
+function scrollToBottom() {
+  requestAnimationFrame(() => { messagesEl.scrollTop = messagesEl.scrollHeight; });
+}
