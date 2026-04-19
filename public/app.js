@@ -1,6 +1,8 @@
 // app.js
-// Client-side logic for InsureSim v2.
+// Client-side logic for InsureSim v3.
 // All prompt construction lives on the server. This file only manages state, UI, and HTTP.
+// v3 adds: hidden insurance-need layer (MI vs CI), discovery tracking, wrong-product-close
+// detection, and HTML log download (fetched from server instead of built client-side).
 
 'use strict';
 
@@ -35,6 +37,10 @@ let psych, memory;
 let stageTurnCount, stageScoreAccum, perStageScores;
 let totalTurns, consecutiveIgnores;
 let sessionEnded, insuranceMentionTurn;
+// v3 additions
+let discoveryLevel;       // 0..5 — aligned-probe counter, reveals backstory progressively
+let latestSpecificPitch;  // 'medical' | 'critical_illness' | 'both' | null
+let wrongCloseCount;      // number of times seller has tried to close the wrong product type
 
 resetState();
 
@@ -47,7 +53,9 @@ function resetState() {
   memory = {
     sports: [], injuries: false, jobConfirmed: false, insuranceGap: false,
     friendStory: false, priceAsked: false, coverageAsked: [],
-    freebieOffered: false, legitimacyChallenged: false
+    freebieOffered: false, legitimacyChallenged: false,
+    // v3 — insurance-need-layer memory flags (populated from server signals, not keywords)
+    miProbed: false, ciProbed: false, wrongPitchedOnce: false,
   };
   stageTurnCount = 0;
   stageScoreAccum = 0;
@@ -56,6 +64,9 @@ function resetState() {
   consecutiveIgnores = 0;
   sessionEnded = false;
   insuranceMentionTurn = null;
+  discoveryLevel = 0;
+  latestSpecificPitch = null;
+  wrongCloseCount = 0;
 }
 
 // ── Sidebar toggle ─────────────────────────────────────────
@@ -135,7 +146,11 @@ async function sendMessage() {
         psych,
         memory,
         totalTurns,
-        insuranceMentionTurn
+        insuranceMentionTurn,
+        // v3 fields
+        discoveryLevel,
+        latestSpecificPitch,
+        wrongCloseCount,
       })
     });
     if (r.status === 429) {
@@ -163,7 +178,15 @@ async function sendMessage() {
   stageTurnCount += 1;
 
   updateMemoryFromUser(text);
+  updateMemoryFromSignals(resp);
   if (resp.insuranceMention && !insuranceMentionTurn) insuranceMentionTurn = totalTurns;
+
+  // v3: update latest specific pitch (server is source of truth on what was specific)
+  if (resp.effectivePitchType) latestSpecificPitch = resp.effectivePitchType;
+  // v3: increment discovery whenever the seller probed the ALIGNED topic area
+  if (resp.discoveryIncrement) discoveryLevel = Math.min(5, discoveryLevel + resp.discoveryIncrement);
+  // v3: count wrong-product close attempts
+  if (resp.wrongCloseAttempt) wrongCloseCount += 1;
 
   updatePsychFromSignals(resp);
 
@@ -207,8 +230,38 @@ async function sendMessage() {
   if (resp.optOut) {
     return endSessionWith('failed_optout', 'Ivan asked to be removed from contact.');
   }
-  if (resp.legitimacy?.type === 'human_handoff' && currentStage === 3 && psych.trust >= 55) {
-    return endSessionWith('success', 'Ivan asked to be connected with an agent — the hand-off succeeded.');
+
+  // v3: seller kept trying to close the WRONG product — hard fail on the second attempt
+  if (wrongCloseCount >= 2) {
+    return endSessionWith(
+      'failed_missold',
+      "Ivan disengaged after you tried to close on the wrong product type twice."
+    );
+  }
+
+  // v3: Ivan's close-signal. Branch on whether the latest specific pitch aligned
+  // with the hidden need. The server tells us this directly so the client never
+  // needs to know the need itself.
+  const ivanReadyToClose =
+    resp.ivanClose ||
+    (resp.legitimacy?.type === 'human_handoff' && currentStage === 3 && psych.trust >= 55);
+  if (ivanReadyToClose) {
+    if (resp.latestSpecificPitchAligned === true) {
+      return endSessionWith(
+        'success',
+        'Ivan asked to be connected / for the link — and the product you landed on matches his actual need.'
+      );
+    }
+    if (resp.latestSpecificPitchAligned === false) {
+      return endSessionWith(
+        'failed_missold',
+        "Ivan agreed — but the product you were pitching wasn't the one that actually matches his concern."
+      );
+    }
+    return endSessionWith(
+      'failed_unfocused',
+      "Ivan said yes — but you never pitched a specific product type, so it's unclear what he agreed to."
+    );
   }
 
   reEnableInput();
@@ -228,6 +281,17 @@ function updateMemoryFromUser(text) {
   if (/\b(price|cost|hkd|month|premium)\b/.test(m))                                                        memory.priceAsked = true;
   if (/\b(exclude|exclusion|claim|payout|compare)\b/.test(m))                                              memory.coverageAsked.push(m.slice(0, 50));
   if (/\b(free|complimentary|no\s*cost|no\s*charge|trial|on\s*us|waive)\b/.test(m))                        memory.freebieOffered = true;
+}
+
+// ── Memory updates from server-side signals (v3) ──────────
+// Server tells us the seller's probe direction + pitch type without telling us
+// the hidden need. We mirror those into memory flags so Ivan sees them in his
+// conversation_memory block.
+function updateMemoryFromSignals(resp) {
+  if (!resp) return;
+  if (resp.probeDirection === 'medical'          || resp.probeDirection === 'both') memory.miProbed = true;
+  if (resp.probeDirection === 'critical_illness' || resp.probeDirection === 'both') memory.ciProbed = true;
+  if (resp.wrongPitch) memory.wrongPitchedOnce = true;
 }
 
 // ── Psych updates from server signals ──────────────────────
@@ -376,16 +440,21 @@ async function endSessionWith(outcome, summary) {
 
 function outcomeTitle(o) {
   return ({
-    success:         'Closed \u2014 link / agent requested',
-    walked:          'Ivan walked away',
-    failed_optout:   'Ivan asked to opt out',
-    failed_ignored:  'Ivan stopped responding',
-    failed_stage:    'Stage failed'
+    success:          'Closed \u2014 right product, link / agent requested',
+    failed_missold:   'Mis-sold \u2014 wrong product closed',
+    failed_unfocused: 'Closed without a specific product',
+    walked:           'Ivan walked away',
+    failed_optout:    'Ivan asked to opt out',
+    failed_ignored:   'Ivan stopped responding',
+    failed_stage:     'Stage failed'
   })[o] || 'Session ended';
 }
 
 function outcomeIcon(o) {
-  return o === 'success' ? '\u2713' : o === 'walked' ? '\u2717' : '!';
+  if (o === 'success')          return '\u2713';
+  if (o === 'failed_unfocused') return '!';
+  if (o === 'failed_stage')     return '!';
+  return '\u2717';
 }
 
 function showInterimEnd(outcome, summary) {
@@ -439,6 +508,60 @@ function showDebriefOverlay(outcome, summary, debrief) {
         row.append(name, score);
         wrap.appendChild(row);
       });
+      return wrap;
+    }));
+  }
+
+  // v3 — main learning of this iteration: did the seller identify the need and pitch right?
+  if (debrief?.needDiscovery) {
+    overlay.appendChild(makeSection('Product-fit review', () => {
+      const nd = debrief.needDiscovery;
+      const wrap = document.createElement('div');
+      wrap.className = 'debrief-needfit';
+      const scoreRow = document.createElement('div');
+      scoreRow.className = 'needfit-scores';
+      const mk = (lbl, val) => {
+        const cell = document.createElement('div');
+        cell.className = 'needfit-cell';
+        const l = document.createElement('div');
+        l.className = 'needfit-label';
+        l.textContent = lbl;
+        const v = document.createElement('div');
+        v.className = 'needfit-val';
+        v.textContent = val == null ? '\u2014' : `${val}/10`;
+        cell.append(l, v);
+        return cell;
+      };
+      scoreRow.append(mk('Discovery', nd.discovery_score), mk('Pitch fit', nd.pitch_fit_score));
+      wrap.appendChild(scoreRow);
+      const addLine = (label, text) => {
+        if (!text) return;
+        const p = document.createElement('div');
+        p.className = 'needfit-line';
+        const strong = document.createElement('strong');
+        strong.textContent = label + ' ';
+        p.append(strong, document.createTextNode(text));
+        wrap.appendChild(p);
+      };
+      addLine('Summary.',               nd.summary);
+      addLine("What Ivan signalled.",   nd.what_ivan_signalled);
+      addLine('What the seller pitched.', nd.what_seller_pitched);
+      addLine('Coaching note.',         nd.coaching_note);
+      return wrap;
+    }));
+  }
+
+  if (debrief?.insuranceNeed) {
+    overlay.appendChild(makeSection("Ivan's real insurance need this session", () => {
+      const wrap = document.createElement('div');
+      wrap.className = 'debrief-need';
+      const name = document.createElement('div');
+      name.className = 'a-name';
+      name.textContent = debrief.insuranceNeed.name;
+      const desc = document.createElement('div');
+      desc.className = 'a-desc';
+      desc.textContent = debrief.insuranceNeed.description;
+      wrap.append(name, desc);
       return wrap;
     }));
   }
@@ -508,7 +631,7 @@ function showDebriefOverlay(outcome, summary, debrief) {
   actions.className = 'debrief-actions';
   const dl = document.createElement('button');
   dl.className = 'download-btn';
-  dl.textContent = '\u2193 Download log';
+  dl.textContent = '\u2193 Download report (HTML)';
   dl.addEventListener('click', downloadLog);
   const restart = document.createElement('button');
   restart.className = 'restart-btn';
@@ -554,26 +677,17 @@ function restartSession() {
 }
 
 // ── Download log ───────────────────────────────────────────
+// v3: log is rendered as HTML server-side (richer — includes judge outputs,
+// archetype/need reveal, and a proper printable format). The sessionId in the
+// URL is already an unguessable random secret.
 function downloadLog() {
-  const log = {
-    sessionId,
-    finishedAt: new Date().toISOString(),
-    stage: currentStage,
-    totalTurns,
-    perStageScores,
-    finalPsych: psych,
-    memory,
-    transcript
-  };
-  const blob = new Blob([JSON.stringify(log, null, 2)], { type: 'application/json' });
-  const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
-  a.href = url;
-  a.download = `insuresim-${sessionId}.json`;
+  a.href = `/api/session/log?sessionId=${encodeURIComponent(sessionId)}`;
+  a.download = `insuresim-${sessionId}.html`;
+  a.rel = 'noopener';
   document.body.appendChild(a);
   a.click();
   document.body.removeChild(a);
-  URL.revokeObjectURL(url);
 }
 
 // ── DOM helpers ────────────────────────────────────────────

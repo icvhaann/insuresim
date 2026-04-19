@@ -1,5 +1,7 @@
 // src/personas.js
 // Ivan persona definitions: base persona + 4 archetypes + privacy taxonomy.
+// The hidden insurance-need variant (medical vs critical_illness) lives in
+// ./insuranceNeeds.js and is stacked ON TOP of whichever archetype is drawn.
 // Loaded server-side; never sent verbatim to the client.
 
 export const BASE_IVAN = `

@@ -12,12 +12,12 @@ async function callJudge({ apiKey, model, system, user, maxTokens = 500, tempera
       stream: false,
       messages: [
         { role: 'system', content: system },
-        { role: 'user', content: user }
+        { role: 'user',   content: user },
       ],
       max_tokens: maxTokens,
       temperature,
-      response_format: { type: 'json_object' }
-    })
+      response_format: { type: 'json_object' },
+    }),
   });
   if (!r.ok) throw new Error(`Judge call failed: ${r.status}`);
   const data = await r.json();
@@ -30,6 +30,7 @@ async function callJudge({ apiKey, model, system, user, maxTokens = 500, tempera
   }
 }
 
+// ─── Borderline breach judge (per-turn fallback) ─────────────────
 const BREACH_JUDGE_SYSTEM = `You are evaluating whether a sales message references private information about Ivan (a fictional 25-year-old HK consultant) that he never shared.
 
 INFERRED facts (a stranger could plausibly know — referencing these GENERICALLY is FINE):
@@ -63,13 +64,14 @@ export async function judgeBreach({ apiKey, model, sellerMessage }) {
       apiKey, model,
       system: BREACH_JUDGE_SYSTEM,
       user: `Seller message: "${sellerMessage}"\n\nIs this a breach? Apply the criteria strictly. If in doubt, it is NOT a breach.`,
-      maxTokens: 200
+      maxTokens: 200,
     });
   } catch (e) {
     return null;
   }
 }
 
+// ─── Transition naturalness judge ───────────────────────────────
 const TRANSITION_JUDGE_SYSTEM = `You are evaluating a sales conversation between a telecom-insurance seller and Ivan, a 25-year-old consultant in HK.
 
 Specifically, rate how NATURALLY the seller transitioned from the opening rapport-building hook into talking about insurance.
@@ -102,13 +104,14 @@ export async function judgeTransition({ apiKey, model, transcript }) {
       apiKey, model,
       system: TRANSITION_JUDGE_SYSTEM,
       user: `Conversation:\n${formatted}\n\nRate the hook→insurance transition.`,
-      maxTokens: 400
+      maxTokens: 400,
     });
   } catch (e) {
     return { score: null, rationale: 'Transition judge unavailable.', best_bridge_moment: '—', weakest_moment: '—' };
   }
 }
 
+// ─── Key-moments judge ──────────────────────────────────────────
 const KEY_MOMENTS_JUDGE_SYSTEM = `You are reviewing a sales conversation between a seller and Ivan (25, HK consultant). Identify 2–4 KEY MOMENTS — turns where something pedagogically important happened (trust shift, breach, smart save, missed opportunity, good question handled well or badly, naturalness break).
 
 For each moment give: turn number, what happened, what the trainee should learn from it.
@@ -128,7 +131,7 @@ export async function judgeKeyMoments({ apiKey, model, transcript }) {
       apiKey, model,
       system: KEY_MOMENTS_JUDGE_SYSTEM,
       user: `Conversation:\n${formatted}\n\nIdentify key moments.`,
-      maxTokens: 700
+      maxTokens: 700,
     });
     return result?.moments || [];
   } catch (e) {
@@ -136,29 +139,86 @@ export async function judgeKeyMoments({ apiKey, model, transcript }) {
   }
 }
 
-const BRIDGE_EXEMPLAR_SYSTEM = `Given a sales conversation, write ONE example of how the seller could have ideally bridged from rapport-building to introducing insurance for THIS specific Ivan archetype.
+// ─── Exemplar bridge (aware of Ivan's actual need) ──────────────
+const BRIDGE_EXEMPLAR_SYSTEM = `Given a sales conversation, write ONE example of how the seller could have ideally bridged from rapport-building to introducing insurance for THIS specific Ivan archetype — and, importantly, the SPECIFIC product type Ivan actually needed.
 
 Constraints:
 - Must reference something Ivan actually shared in this conversation
-- Must feel natural, not pitch-y
+- Must feel natural, not pitchy
 - Must respect that Ivan is sceptical of unsolicited insurance approaches
+- Must reflect the correct product type for Ivan's real need in this session
 - 2–3 sentences only
 - Written in the voice of a thoughtful seller, not a script
 
 Return JSON: {"exemplar": "<the example seller message, as plain text>"}`;
 
-export async function generateExemplar({ apiKey, model, transcript, archetypeName }) {
+export async function generateExemplar({ apiKey, model, transcript, archetypeName, insuranceNeedName, insuranceNeedOneLiner }) {
   try {
     const formatted = (transcript || []).map((t, i) => `Turn ${i + 1} [${t.role}]: ${t.content}`).join('\n');
     const result = await callJudge({
       apiKey, model,
       system: BRIDGE_EXEMPLAR_SYSTEM,
-      user: `Ivan's archetype today: ${archetypeName}\n\nConversation:\n${formatted}\n\nWrite one exemplar bridge message the seller could have used.`,
-      maxTokens: 250,
-      temperature: 0.6
+      user: `Ivan's archetype today: ${archetypeName}
+Ivan's actual insurance need today: ${insuranceNeedName}
+Context on the need: ${insuranceNeedOneLiner}
+
+Conversation:
+${formatted}
+
+Write one exemplar bridge message the seller could have used — bridging specifically toward the product type Ivan needed.`,
+      maxTokens: 280,
+      temperature: 0.6,
     });
     return result?.exemplar || '';
   } catch (e) {
     return '';
+  }
+}
+
+// ─── Need-discovery judge (new) ────────────────────────────────
+const NEED_DISCOVERY_SYSTEM = `You are evaluating a sales conversation between a telecom-partner seller and Ivan (25, HK consultant). Ivan has a SPECIFIC hidden insurance need (either medical/hospital indemnity OR critical illness / lump sum — you will be told which). A skilled seller would have:
+
+1. Probed the right topic area to uncover Ivan's real concern
+2. Recognised the signals Ivan dropped (family, injuries, bills, checkups, uncle, etc.)
+3. Pitched the CORRECT product type (not the other one)
+4. Earned Ivan's agreement by specificity, not by pressure
+
+Do not reveal the internal mechanics or scoring. Write the assessment in plain language as if reviewing a real sales call.
+
+Return JSON:
+{
+  "discovery_score": <integer 1-10, how well the seller uncovered Ivan's real concern>,
+  "pitch_fit_score":  <integer 1-10, how well the seller's product pitch matched Ivan's actual need>,
+  "summary": "<2-3 sentences, plainspoken>",
+  "what_ivan_signalled": "<one sentence naming the signal(s) Ivan actually dropped in this conversation>",
+  "what_seller_pitched":  "<one sentence describing what the seller ended up pitching>",
+  "coaching_note": "<one sentence of concrete coaching for next time>"
+}`;
+
+export async function judgeNeedDiscovery({ apiKey, model, transcript, insuranceNeedName, insuranceNeedOneLiner }) {
+  try {
+    const formatted = (transcript || []).map((t, i) => `Turn ${i + 1} [${t.role}]: ${t.content}`).join('\n');
+    return await callJudge({
+      apiKey, model,
+      system: NEED_DISCOVERY_SYSTEM,
+      user: `Ivan's actual need today: ${insuranceNeedName}
+Context: ${insuranceNeedOneLiner}
+
+Conversation:
+${formatted}
+
+Assess discovery and product-fit.`,
+      maxTokens: 500,
+      temperature: 0.3,
+    });
+  } catch (e) {
+    return {
+      discovery_score: null,
+      pitch_fit_score: null,
+      summary: 'Need-discovery judge unavailable.',
+      what_ivan_signalled: '',
+      what_seller_pitched: '',
+      coaching_note: '',
+    };
   }
 }

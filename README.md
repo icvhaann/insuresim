@@ -1,8 +1,8 @@
-# InsureSim v2
+# InsureSim v3
 
 Internal sales-training simulator. Workshop tool for sellers learning to bridge from a personalised hook into an insurance pitch with a HK consumer persona ("Ivan C.").
 
-This is v2 — a refactor of the original. Key changes summarised at the end.
+This is v3. Key changes vs v2 summarised at the bottom.
 
 ---
 
@@ -12,15 +12,15 @@ This is v2 — a refactor of the original. Key changes summarised at the end.
 2. New Railway project → deploy from repo.
 3. Environment variables (Settings → Variables):
    - `DEEPSEEK_API_KEY` — required.
-   - `DEEPSEEK_MODEL` — optional. Defaults to `deepseek-chat` (DeepSeek-V3.2). Don't use `deepseek-reasoner` here — JSON mode behaves worse with the thinking model.
-   - `ADMIN_TOKEN` — required if you want to use the facilitator log export. Generate a long random string.
+   - `DEEPSEEK_MODEL` — optional. Defaults to `deepseek-chat` (DeepSeek-V3.2). Don't use `deepseek-reasoner` — JSON mode behaves worse with the thinking model.
+   - `ADMIN_TOKEN` — required for the facilitator HTML export **and** the in-browser facilitator cheatsheet at `/facilitator`. Generate a long random string.
 4. Railway picks up `npm start` automatically.
 5. After each workshop: rotate the DeepSeek API key.
 
 ## Local
 
 ```
-cp .env.example .env          # fill in DEEPSEEK_API_KEY
+cp .env.example .env          # fill in DEEPSEEK_API_KEY (and ADMIN_TOKEN if you want the cheatsheet)
 npm install
 npm start                     # http://localhost:3000
 ```
@@ -30,91 +30,107 @@ npm start                     # http://localhost:3000
 ## Workshop flow
 
 - Trainee opens the URL, hits **Start Session**.
-- The simulator picks one of four personas at random (hidden until debrief).
+- The simulator draws **one of four archetypes** AND **one of two insurance needs** at random (both hidden until the debrief). Eight possible combinations per session.
 - Three stages: Hook → Cultivate → Convert.
-- Each stage has min turns / max turns / score thresholds. Falling below means stage failure. Crossing the threshold advances.
-- Win condition: Ivan asks to be connected with an agent or to receive details.
-- Lose conditions: Ivan walks away, opts out, or stops responding for three turns.
-- At the end: a debrief overlay shows scorecard, transition naturalness score, key moments, the persona reveal, and a suggested bridge example.
-- Trainee downloads a JSON log from the debrief overlay and hands it to the facilitator.
+- Each stage has min turns / max turns / score thresholds. Falling below means stage failure; crossing the threshold advances.
+- The trainee's job is to (a) open without being creepy, (b) probe the right topic area to uncover Ivan's real concern, (c) pitch the **right product type** — medical / hospital indemnity OR critical illness / lump sum — and (d) earn the close.
+- Possible outcomes:
+  - `success` — Ivan asks for link / agent AND the latest specific pitch matches his real need
+  - `failed_missold` — Ivan agreed, or the seller tried to close, on the **wrong** product type
+  - `failed_unfocused` — Ivan agreed, but the seller never pitched a specific product type
+  - `walked` — Ivan walked after insurance was mentioned too early
+  - `failed_optout` — Ivan asked to be removed
+  - `failed_ignored` — Ivan stopped replying for 3+ turns
+  - `failed_stage` — a stage timed out without enough engagement
+- At the end: a debrief overlay shows a product-fit review (new), the insurance-need reveal, scorecard, transition naturalness score, key moments, the archetype reveal, and an exemplar bridge.
+- The trainee downloads a **polished HTML report** from the debrief overlay (printable to PDF).
 
-## Facilitator log export
+## Facilitator access (`ADMIN_TOKEN` required)
 
-If `ADMIN_TOKEN` is set, the facilitator can export the full audit log of all sessions on the box:
-
+**Full HTML export** — every session held in memory, rendered as a printable report:
 ```
-GET /api/admin/log?token=YOUR_ADMIN_TOKEN
+/api/admin/log?token=YOUR_ADMIN_TOKEN
 ```
 
-Returns JSON of every session held in memory (capped at 200 most recent, cleared on restart).
+**JSON fallback** — raw audit data for debugging:
+```
+/api/admin/log.json?token=YOUR_ADMIN_TOKEN
+```
+
+**Cheatsheet** — in-browser, token-gated, rendered from `docs/FACILITATOR_CHEATSHEET.md`:
+```
+/facilitator?token=YOUR_ADMIN_TOKEN
+```
+
+The cheatsheet covers: the 4 archetypes, both insurance-need variants (backstories + signal phrases + correct pitch direction), thematic anchors per stage, common failure modes, privacy-breach reference, and a suggested workshop run sheet.
 
 ---
 
-## What changed vs v1
+## What changed vs v2
 
-| Area | v1 | v2 |
+| Area | v2 | v3 |
 |---|---|---|
-| Prompt assembly | Client-side, sent in plaintext | Server-side, never exposed to client |
-| Persona | One Ivan | Four archetypes (Burned, Default, Slammed, Warm-but-wary) randomly assigned |
-| Output | Raw text, sometimes returned `[ignored message]` literal | JSON contract `{thought, reply, ignoring_reason}` with sentinel-string filter |
-| Privacy taxonomy | Implicit | Explicit three-bucket: inferred-OK / not-a-breach-even-though-specific / private |
-| Hallucination guard | None | "Nicety test" — Ivan must internally name the specific private fact before reacting suspiciously |
-| Breach detection | Regex only | Regex first-pass + LLM judge for borderline cases (parallel call) |
-| Insurance walk-away | Hard binary cutoff at turns 1–2 | Probability curve `0.90 × exp(-0.35 × (turn-1))`, modulated by trust |
-| Walk-away presentation | Always overlay | 50/50 between cold-reply-then-overlay or overlay-only |
-| Severe breach reaction | Canned alarm pool of ~10 lines | Model-generated, instructed via high-priority turn directive |
-| Ivan's depth | Thin backstory | Specific frustrations, things he genuinely wants advice on, texture details |
-| In-session coaching | Tip box, stage hints | Removed entirely — feedback only at debrief |
-| Sidebar | Always open | Collapsed by default (data must be deliberately accessed) |
-| Score display | Cumulative only | Stage average (large) + cumulative (small) + per-stage history |
-| Debrief | None | Outcome banner, scorecard, transition naturalness (LLM judge 1-10), key moments (LLM judge), persona reveal, exemplar bridge |
-| Download log button | Header, always visible | Hidden during play, appears in debrief overlay only |
-| XSS surface | innerHTML in many places | textContent everywhere |
-| Cheat codes | Bypassed AI to force outcomes | Removed |
-| Rate limit | Broken behind Railway proxy | Fixed (`trust proxy: 1`) |
-| Audit log | None | In-memory ring buffer, 200-session cap, facilitator export endpoint |
+| Persona dimensions | Archetype only (4 options) | Archetype × insurance need (4 × 2 = 8 combos) |
+| Hidden layer | None beyond archetype | Medical vs critical-illness need with distinct backstories, discovery gates, soft-rejection lines, and correct-pitch signals |
+| Scoring | Based on privacy and engagement | Also factors in probe-direction alignment (Stage 2) and pitch-type alignment (Stage 3) |
+| Stage 3 wrong-pitch | Undifferentiated | Ivan soft-rejects wrong type; hard-fails only on close attempts |
+| Outcomes | `success` / `walked` / `failed_optout` / `failed_ignored` / `failed_stage` | Adds `failed_missold` (wrong product closed) and `failed_unfocused` (no specific product ever pitched) |
+| Debrief | Transition + key moments + exemplar + archetype reveal | Adds **product-fit review** (discovery score, pitch-fit score, coaching note) and **insurance-need reveal** |
+| Log export | JSON only | Polished HTML (per-session + facilitator full export), printable to PDF, C-suite-friendly |
+| Facilitator docs | None | Token-gated `/facilitator` route serving a markdown cheatsheet as HTML |
+| Discovery mechanic | Binary | Server tracks `discoveryLevel` (aligned-probe counter); Ivan progressively shares backstory |
+| Client state | Psych + memory | Adds `discoveryLevel`, `latestSpecificPitch`, `wrongCloseCount`; memory mirrors server-side probe / wrong-pitch signals |
 
 ---
 
 ## Cost (DeepSeek-V3.2)
 
-Roughly $0.001–0.002 per turn (persona + occasional judge). End-of-session adds ~$0.003 (transition + key-moments + exemplar judges run in parallel). A full workshop of 30 trainees × ~30 turns per session is around USD $1–2.
+Roughly $0.001–0.002 per turn (persona + occasional judge). End-of-session adds ~$0.004 (transition + key-moments + exemplar + **need-discovery** judges run in parallel). A full workshop of 30 trainees × ~30 turns per session is around USD $1.50–2.50.
 
 ---
 
-## Dry-run all four archetypes before the workshop
+## Dry-run before the workshop
 
-The four personas behave differently enough that the facilitator should walk through one session of each before the trainees arrive. Roughly:
+You now want at least **8 sessions** to see each combo at least once (4 archetypes × 2 needs). In practice you'll probably want 12–16 so you've seen each combo go well AND go poorly. The hardest lesson — the **mis-sell outcome** — appears when the seller locks onto the wrong product direction and closes anyway. Force one of these in your dry-run so you can talk about what the sim flags and how.
 
-- **Default**: a baseline run. Polite hook → relevant cultivation → soft pitch should advance through all three stages.
-- **Burned**: any unsolicited tone gets a "is this a scam" within 2–3 turns. A free-trial offer makes things worse, not better. The trainee has to address legitimacy honestly to recover.
-- **Slammed**: 1–3 word replies most turns. The trainee needs to be brutally concise and directly relevant or Ivan walks. Long messages get "tldr".
-- **Warm-but-wary**: easy to get warmth in stages 1–2. But any privacy breach lands ~1.3× harder than for other archetypes — the contrast amplifies the reaction.
+Rough archetype behaviours (unchanged from v2):
+- **Default**: baseline.
+- **Burned**: challenges legitimacy within 2–3 turns.
+- **Slammed**: 1–3 word replies. Long messages get "tldr".
+- **Warm-but-wary**: easy warmth, but breaches land ~1.3× harder.
 
-Each session randomly assigns one of the four; you may need 6–10 sessions before you see all four.
+New in v3 — the two insurance needs:
+- **Medical / hospital indemnity** (MI): Ivan has a recent HKD 4,800 out-of-pocket after rolling an ankle; his mum had surgery last month; his friend's Niseko story is top of mind. Correct pitch: hospital indemnity / outpatient / sports rider / private-room cover / VHIS.
+- **Critical illness** (CI): Ivan's uncle has stage-2 cancer; his grandfather died of a heart attack at 58; Ivan's own checkup came back with borderline cholesterol. Correct pitch: critical illness / early CI / cancer lump-sum / income protection / multi-claim CI.
+
+See `docs/FACILITATOR_CHEATSHEET.md` (or `/facilitator?token=...`) for the full reference.
 
 ---
 
 ## File map
 
 ```
-server.js              — Express app, endpoints, model orchestration
-src/personas.js        — Base Ivan + 4 archetypes + privacy taxonomy
-src/prompts.js         — System prompt assembly, turn instruction, pre-scoring
-src/breaches.js        — Regex patterns, walk-away probability function
-src/judges.js          — LLM judge calls (breach, transition, key moments, exemplar)
-src/scoring.js         — Per-turn 1-10 score
-src/audit.js           — In-memory session log
-public/index.html      — Shell
-public/app.js          — Frontend logic (state, UI, HTTP)
-public/styles.css      — Styles
+server.js                        — Express app, endpoints, orchestration, HTML routes
+src/personas.js                  — Base Ivan + 4 archetypes + privacy taxonomy
+src/insuranceNeeds.js            — NEW: MI vs CI variants, backstories, pitch/probe classifiers
+src/prompts.js                   — System prompt assembly, turn instruction, need-aware pre-scoring
+src/breaches.js                  — Regex patterns, walk-away probability
+src/judges.js                    — LLM judges (breach, transition, key moments, exemplar, need-discovery)
+src/scoring.js                   — Per-turn 1-10 score with alignment factor
+src/audit.js                     — In-memory session log with debrief attachment
+src/logExport.js                 — NEW: HTML render for per-session + facilitator exports
+docs/FACILITATOR_CHEATSHEET.md   — NEW: facilitator-only workshop reference
+public/index.html                — Shell
+public/app.js                    — Frontend logic (state, UI, HTTP), v3 state additions
+public/styles.css                — Styles
 ```
 
 ---
 
 ## Known limits / things to revisit
 
-- The simulator's framing — that telco data can be openly used to pitch insurance based on inferred behavioural patterns — is a workshop construct. In real deployment under HK PDPO Part 6A and IA GL25 disclosure rules, much of this would require explicit consent and disclosure. This is intentional for training friction; it is not a model for production sales practice.
-- Audit log is in-memory only. If Railway restarts the container mid-workshop, history is lost. For persistent storage, swap `src/audit.js` to a file or DB.
-- DeepSeek model behaviour is the bottleneck on persona realism. If the persona feels stiff, trying `gpt-4o` or `claude-sonnet` for the persona call (keeping DeepSeek for cheap judge calls) is the next step.
-- The LLM judge for breach detection fires only when regex misses but the message is long and contains private-adjacent terms. It is not run on every turn for cost reasons. Tune the trigger condition in `server.js` if false-negatives appear.
+- Same production caveats as v2: framing is a workshop construct; real HK PDPO Part 6A / IA GL25 deployment would require explicit consent.
+- Audit log remains in-memory. Railway restart mid-workshop = lost data. Swap `src/audit.js` for persistent storage if needed.
+- DeepSeek model realism is the bottleneck for persona authenticity. Consider `gpt-4o` or `claude-sonnet` for the persona call if stiffness appears.
+- Pitch classification is regex-based. Creative phrasings that avoid canonical product terminology ("big-illness protection that pays a chunk on diagnosis") may be classified as `generic` even when they're genuinely CI. The need-discovery LLM judge at debrief provides a second opinion that is NOT regex-constrained.
+- The borderline-breach judge still fires only on private-adjacent regex triggers. Tune in `server.js` if false-negatives appear.

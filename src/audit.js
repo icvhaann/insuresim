@@ -1,21 +1,23 @@
 // src/audit.js
 // In-memory ring-buffered session log. Ephemeral — clears on restart.
-// Used by the facilitator export endpoint and for debrief continuity.
+// Consumed by the debrief flow, the per-session HTML download, and the facilitator
+// HTML export endpoint.
 
 const MAX_SESSIONS = 200;
 const sessions = new Map();
 const order = [];
 
-export function createSession(sessionId, archetypeKey) {
+export function createSession(sessionId, archetypeKey, insuranceNeedKey) {
   if (sessions.has(sessionId)) return;
   sessions.set(sessionId, {
     sessionId,
     archetypeKey,
+    insuranceNeedKey,
     startedAt: Date.now(),
     endedAt: null,
     outcome: null,
     finalState: null,
-    turns: []
+    turns: [],
   });
   order.push(sessionId);
   while (order.length > MAX_SESSIONS) {
@@ -36,6 +38,12 @@ export function endSession(sessionId, outcome, finalState) {
   s.endedAt = Date.now();
   s.outcome = outcome;
   s.finalState = finalState;
+}
+
+export function attachDebrief(sessionId, debrief) {
+  const s = sessions.get(sessionId);
+  if (!s) return;
+  s.debrief = debrief;
 }
 
 export function getSession(sessionId) {

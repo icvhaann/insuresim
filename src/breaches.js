@@ -59,7 +59,8 @@ export const INSURANCE_PATTERN = /\b(insurance|insure|insurer|policy|policies|pr
 
 export const FREEBIE_PATTERN = /\bfree\s*(trial|month|first\s*month|cover|consultation)|complimentary|no\s*(cost|charge|fee)|on\s*us|waive(d?)\s*(fee|premium)/i;
 
-export const USER_INTENT_CLOSE_PATTERN = /send.{0,10}(link|form|detail|info)|sign.?up|how\s*do\s*i\s*(get|apply|start)|i.ll\s*(take|do|get)\s*it|where\s*do\s*i|i.m\s*interested|let.s\s*do\s*it|count\s*me\s*in/i;
+// IVAN-side close / handoff signals — this is Ivan saying "yes I want this".
+export const USER_INTENT_CLOSE_PATTERN = /send.{0,10}(me\s*)?(the\s*)?(link|form|detail|info|brochure|policy|quote|proposal)|sign\s*me\s*up|how\s*do\s*i\s*(get|apply|start)|i.ll\s*(take|do|get)\s*it|i.m\s*(in|interested|keen)|let.s\s*do\s*it|count\s*me\s*in|put\s*me\s*down|connect\s*me\s*with|talk\s*to\s*(an?\s*)?agent|speak\s*to\s*(an?\s*)?(agent|advisor|human|real\s*person|actual\s*person)|can\s*(i|we)\s*(get|set\s*up|arrange)\s*a\s*call|yeah\s*(sure|ok|let's)\s*(send|do)/i;
 
 export const USER_WALK_PATTERN = /(fine\s*with\s*my\s*current|prefer\s*my\s*current|not\s*worth\s*it\s*for\s*me|i.ll\s*pass|nah\s*doesn.?t\s*fit|doesn.?t\s*fit\s*for\s*me|not\s*for\s*me|gonna\s*pass|not\s*convinced|rather\s*keep|ill\s*stick)/i;
 
@@ -69,7 +70,7 @@ export function detectPrivate(msg)       { return PRIVATE_PATTERNS.filter(p => p
 export function isInsuranceMention(msg)  { return INSURANCE_PATTERN.test(msg); }
 export function isOptOut(msg)            { return OPT_OUT_PATTERN.test(msg); }
 export function isFreebie(msg)           { return FREEBIE_PATTERN.test(msg); }
-export function isUserClose(msg)         { return USER_INTENT_CLOSE_PATTERN.test(msg); }
+export function isUserClose(msg)         { return USER_INTENT_CLOSE_PATTERN.test(msg || ''); }
 export function isIvanWalk(msg)          { return USER_WALK_PATTERN.test(msg); }
 
 export function detectLegitimacy(msg) {

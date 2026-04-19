@@ -188,3 +188,14 @@ textarea::placeholder{color:var(--muted)}
   .sidebar-overlay{display:none;position:fixed;inset:0;top:49px;background:rgba(0,0,0,.5);z-index:39}
   .sidebar-overlay.visible{display:block}
 }
+
+/* ── v3 debrief additions: product-fit review + need reveal ── */
+.debrief-needfit{display:flex;flex-direction:column;gap:10px}
+.needfit-scores{display:flex;gap:18px;margin-bottom:4px}
+.needfit-cell{background:var(--surface2);border:1px solid var(--border);border-radius:6px;padding:8px 12px;min-width:100px}
+.needfit-label{font-family:var(--mono);font-size:10px;color:var(--muted2);text-transform:uppercase;letter-spacing:.08em;margin-bottom:3px}
+.needfit-val{font-size:18px;font-weight:600;color:var(--text)}
+.needfit-line{font-size:13px;color:var(--text);line-height:1.55}
+.needfit-line strong{color:var(--accent2);font-weight:500}
+.debrief-need .a-name{font-size:14px;font-weight:500;color:var(--accent2);margin-bottom:4px}
+.debrief-need .a-desc{font-size:13px;color:var(--muted2);line-height:1.55}

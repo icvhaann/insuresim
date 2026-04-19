@@ -1,6 +1,6 @@
 {
   "name": "insuresim",
-  "version": "2.0.0",
+  "version": "3.0.0",
   "description": "Internal sales-training simulator. Telco x insurer. Workshop tool.",
   "type": "module",
   "main": "server.js",
