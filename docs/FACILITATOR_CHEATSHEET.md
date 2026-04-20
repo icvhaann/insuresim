@@ -1,4 +1,4 @@
-# Facilitator Cheatsheet — InsureSim v4
+# Facilitator Cheatsheet — InsureSim v5
 
 **Workshop-only reference. Do not share with trainees during the session.**
 

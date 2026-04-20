@@ -1,4 +1,4 @@
-// server.js — InsureSim v4
+// server.js — InsureSim v5
 //
 // Adds over v3:
 //   • 5-cover catalog (covers.js) replaces 2-need model
@@ -25,12 +25,13 @@ import {
 import { judgeBreach, judgeTransition, judgeKeyMoments, generateExemplar, judgeNeedDiscovery } from './src/judges.js';
 import { createSession, logTurn, endSession, getSession, exportAll, attachDebrief } from './src/audit.js';
 import { scoreTurn } from './src/scoring.js';
-import { regexGroundingCheck, llmGroundingCheck, shouldValidateLLM } from './src/validator.js';
+import { regexGroundingCheck, llmGroundingCheck, shouldValidateLLM, antiRepetitionCheck, wildClaimCheck } from './src/validator.js';
 import {
   SESSION_STATES, transition as smTransition,
   evaluateRecoveryAttempt, canAdvanceStage,
 } from './src/stateMachine.js';
 import { renderSessionPage, renderAllSessionsPage } from './src/logExport.js';
+import { renderFactSheetPage, renderAllFactSheetsPage } from './src/factsheet.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const app = express();
@@ -247,19 +248,30 @@ app.post('/api/chat', async (req, res) => {
   let rawContent = personaData.choices?.[0]?.message?.content || '';
   let parsed = parseJsonLoose(rawContent);
 
-  // ── Grounding validator pass 1
+  // ── Grounding validator pass 1 (v5: regex + anti-repetition + wild-claim + LLM)
   let validatorRan = false, validatorOk = true, validatorIssue = null;
   let regenAttempted = false;
   const runValidation = async (candidateReply) => {
+    // Layer A: regex grounding (free-offer / price / link / plan-name hallucination)
     const rc = regexGroundingCheck(candidateReply, trimmedHistory, userMsg);
-    if (!rc.ok) return { ok: false, issue: rc.issues[0], layer: 'regex' };
+    if (!rc.ok) return { ok: false, issue: rc.issues[0], layer: 'regex_grounding' };
+
+    // Layer B (v5): anti-repetition — Ivan can't repeat himself verbatim or nearly so
+    const ar = antiRepetitionCheck(candidateReply, trimmedHistory);
+    if (!ar.ok) return { ok: false, issue: ar.issue, layer: 'anti_repetition' };
+
+    // Layer C (v5): wild-claim — Ivan can't invent competitors, percentages, absolute claims
+    const wc = wildClaimCheck(candidateReply, trimmedHistory, userMsg);
+    if (!wc.ok) return { ok: false, issue: wc.issues[0], layer: 'wild_claim' };
+
+    // Layer D: LLM validator (only when signal warrants it)
     if (!shouldValidateLLM(candidateReply, 0)) return { ok: true };
     const llm = await llmGroundingCheck({
       apiKey: DEEPSEEK_API_KEY, model: DEEPSEEK_MODEL,
       conversationHistory: trimmedHistory, latestSellerMsg: userMsg,
       ivanReply: candidateReply,
     });
-    if (llm.ok === false) return { ok: false, issue: llm.issue, layer: 'llm' };
+    if (llm.ok === false) return { ok: false, issue: llm.issue, layer: 'llm_grounding' };
     return { ok: true };
   };
 
@@ -523,43 +535,283 @@ app.get('/api/session/report.html', (req, res) => {
   res.set('Content-Type', 'text/html; charset=utf-8').send(renderSessionPage(s, { forDownload: true }));
 });
 
-// Facilitator cheatsheet (token-gated HTML)
+// ─── Facilitator cheatsheet (token-gated HTML, v5: proper 401/503 pages) ─
 app.get('/facilitator', (req, res) => {
-  if (!ADMIN_TOKEN) return res.status(503).send('Cheatsheet disabled (ADMIN_TOKEN not set).');
-  if (req.query.token !== ADMIN_TOKEN) return res.status(401).send('Unauthorized.');
+  if (!ADMIN_TOKEN) {
+    return res
+      .status(503)
+      .set('Content-Type', 'text/html; charset=utf-8')
+      .send(renderGatePage({
+        title: 'Facilitator cheatsheet disabled',
+        body: `<p>The facilitator cheatsheet is currently disabled on this server.</p>
+<p>To enable it, set the <code>ADMIN_TOKEN</code> environment variable in your Railway (or local) configuration, then restart the server. Once set, visit this URL with the token as a query parameter:</p>
+<pre>/facilitator?token=YOUR_ADMIN_TOKEN</pre>`,
+      }));
+  }
+  if (req.query.token !== ADMIN_TOKEN) {
+    return res
+      .status(401)
+      .set('Content-Type', 'text/html; charset=utf-8')
+      .send(renderGatePage({
+        title: 'Unauthorized',
+        body: `<p>This page is restricted. You need to visit it with your <code>ADMIN_TOKEN</code> query parameter:</p>
+<pre>/facilitator?token=YOUR_ADMIN_TOKEN</pre>
+<p>Ask the workshop administrator for the token. The same token also unlocks <code>/api/admin/log</code> and <code>/facilitator/factsheets</code>.</p>`,
+      }));
+  }
   const p = join(__dirname, 'docs', 'FACILITATOR_CHEATSHEET.md');
-  if (!existsSync(p)) return res.status(404).send('Cheatsheet not found.');
+  if (!existsSync(p)) {
+    return res.status(404).set('Content-Type', 'text/html; charset=utf-8').send(renderGatePage({
+      title: 'Cheatsheet source missing',
+      body: `<p>The cheatsheet markdown source (<code>docs/FACILITATOR_CHEATSHEET.md</code>) is missing from this deployment.</p>`,
+    }));
+  }
   const md = readFileSync(p, 'utf-8');
-  res.set('Content-Type', 'text/html; charset=utf-8').send(renderCheatsheetHtml(md));
+  res.set('Content-Type', 'text/html; charset=utf-8').send(renderCheatsheetHtml(md, req.query.token));
 });
 
-// Very small markdown → HTML for the cheatsheet (server-side, no deps).
-function renderCheatsheetHtml(md) {
-  const esc = s => s.replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
-  const lines = md.split('\n');
+// ─── Fact sheet routes (v5) ──────────────────────────────
+// Public per-cover fact sheet — useful for sharing individual product briefs.
+// Token gate intentionally NOT applied here: these are product fact sheets,
+// not internal coaching docs.
+app.get('/api/factsheet/:coverKey.html', (req, res) => {
+  res.set('Content-Type', 'text/html; charset=utf-8').send(renderFactSheetPage(req.params.coverKey));
+});
+
+// Combined pack is facilitator-scoped (bulk printable brief).
+app.get('/facilitator/factsheets', (req, res) => {
+  if (!ADMIN_TOKEN) return res.status(503).set('Content-Type', 'text/html').send(renderGatePage({
+    title: 'Fact sheet pack disabled',
+    body: `<p>Set <code>ADMIN_TOKEN</code> to enable this page.</p>`,
+  }));
+  if (req.query.token !== ADMIN_TOKEN) return res.status(401).set('Content-Type', 'text/html').send(renderGatePage({
+    title: 'Unauthorized',
+    body: `<p>Visit with <code>?token=YOUR_ADMIN_TOKEN</code>.</p>`,
+  }));
+  res.set('Content-Type', 'text/html; charset=utf-8').send(renderAllFactSheetsPage());
+});
+
+// v5: nicer gate page (shared for 401/503 across facilitator routes).
+function renderGatePage({ title, body }) {
+  return `<!doctype html><meta charset="utf-8"><title>${title} — InsureSim</title>
+<style>body{font-family:system-ui,Arial,sans-serif;max-width:640px;margin:80px auto;padding:0 20px;color:#222;line-height:1.55}
+h1{font-size:22px;margin-bottom:12px}pre{background:#f6f8fa;padding:10px 14px;border-radius:6px;font-size:13px;overflow:auto}
+code{background:#f6f8fa;padding:2px 6px;border-radius:3px;font-size:13px}a{color:#2c5aa0}
+.back{margin-top:24px;font-size:12px;color:#888}</style>
+<h1>${title}</h1>${body}<div class="back"><a href="/">← Back to simulator</a></div>`;
+}
+
+// v5: improved markdown → HTML for the cheatsheet.
+// Handles: headings, ordered + unordered lists, code blocks, tables (pipe
+// syntax), horizontal rules, inline code / bold / italic / links. Plus a
+// print button and a "Download printable HTML" link that serves the same
+// content with print-only styling.
+function renderCheatsheetHtml(md, token) {
+  const escText = s => String(s || '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+
+  // Inline formatting (safe on already-escaped content).
+  const renderInline = s => {
+    let out = escText(s);
+    // Code spans
+    out = out.replace(/`([^`]+)`/g, (_, code) => `<code>${code}</code>`);
+    // Bold **x**
+    out = out.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
+    // Italic _x_ (conservative — only when surrounded by spaces or line start)
+    out = out.replace(/(^|[\s(])_([^_\n]+)_(?=[\s).,!?]|$)/g, '$1<em>$2</em>');
+    // Links [text](url)
+    out = out.replace(/\[([^\]]+)\]\(([^)\s]+)\)/g, (_, txt, url) => `<a href="${url}">${txt}</a>`);
+    return out;
+  };
+
+  const lines = String(md || '').split('\n');
   const out = [];
-  let inList = false, inCode = false;
-  for (const line of lines) {
-    if (line.startsWith('```')) { if (inCode) out.push('</pre>'); else out.push('<pre>'); inCode = !inCode; continue; }
-    if (inCode) { out.push(esc(line)); continue; }
-    if (/^#\s/.test(line)) { if (inList) { out.push('</ul>'); inList = false; } out.push('<h1>' + esc(line.slice(2)) + '</h1>'); continue; }
-    if (/^##\s/.test(line)) { if (inList) { out.push('</ul>'); inList = false; } out.push('<h2>' + esc(line.slice(3)) + '</h2>'); continue; }
-    if (/^###\s/.test(line)) { if (inList) { out.push('</ul>'); inList = false; } out.push('<h3>' + esc(line.slice(4)) + '</h3>'); continue; }
-    if (/^\s*[-*]\s/.test(line)) {
-      if (!inList) { out.push('<ul>'); inList = true; }
-      out.push('<li>' + esc(line.replace(/^\s*[-*]\s/, '')) + '</li>');
+  let i = 0;
+  let inCode = false;
+  let inList = false;
+  let listTag = 'ul';
+
+  const closeList = () => { if (inList) { out.push(`</${listTag}>`); inList = false; } };
+
+  while (i < lines.length) {
+    const line = lines[i];
+
+    if (line.startsWith('```')) {
+      closeList();
+      if (inCode) { out.push('</code></pre>'); inCode = false; }
+      else        { out.push('<pre><code>'); inCode = true; }
+      i++;
       continue;
     }
-    if (inList) { out.push('</ul>'); inList = false; }
-    if (line.trim() === '') out.push('<br>');
-    else out.push('<p>' + esc(line) + '</p>');
+    if (inCode) { out.push(escText(line)); i++; continue; }
+
+    // Table: current line has pipes and next line is a separator
+    if (/\|/.test(line) && i + 1 < lines.length && /^[\s|:-]+$/.test(lines[i + 1]) && /\|/.test(lines[i + 1])) {
+      closeList();
+      const header = line.split('|').map(s => s.trim()).filter((s, idx, arr) => !(idx === 0 && s === '') && !(idx === arr.length - 1 && s === ''));
+      i += 2; // skip header + separator
+      const rows = [];
+      while (i < lines.length && /\|/.test(lines[i]) && lines[i].trim().length > 0) {
+        const cells = lines[i].split('|').map(s => s.trim()).filter((s, idx, arr) => !(idx === 0 && s === '') && !(idx === arr.length - 1 && s === ''));
+        rows.push(cells);
+        i++;
+      }
+      out.push('<table><thead><tr>' + header.map(h => `<th>${renderInline(h)}</th>`).join('') + '</tr></thead>');
+      out.push('<tbody>' + rows.map(r => '<tr>' + r.map(c => `<td>${renderInline(c)}</td>`).join('') + '</tr>').join('') + '</tbody></table>');
+      continue;
+    }
+
+    // Horizontal rule
+    if (/^---+\s*$/.test(line)) {
+      closeList();
+      out.push('<hr>');
+      i++;
+      continue;
+    }
+
+    // Headings
+    const hMatch = /^(#{1,4})\s+(.*)$/.exec(line);
+    if (hMatch) {
+      closeList();
+      const level = hMatch[1].length;
+      out.push(`<h${level}>${renderInline(hMatch[2])}</h${level}>`);
+      i++;
+      continue;
+    }
+
+    // Ordered list
+    const olMatch = /^\s*\d+\.\s+(.*)$/.exec(line);
+    if (olMatch) {
+      if (!inList || listTag !== 'ol') { closeList(); out.push('<ol>'); inList = true; listTag = 'ol'; }
+      out.push(`<li>${renderInline(olMatch[1])}</li>`);
+      i++;
+      continue;
+    }
+
+    // Unordered list
+    const ulMatch = /^\s*[-*]\s+(.*)$/.exec(line);
+    if (ulMatch) {
+      if (!inList || listTag !== 'ul') { closeList(); out.push('<ul>'); inList = true; listTag = 'ul'; }
+      out.push(`<li>${renderInline(ulMatch[1])}</li>`);
+      i++;
+      continue;
+    }
+
+    // Blank line
+    if (line.trim() === '') {
+      closeList();
+      i++;
+      continue;
+    }
+
+    // Paragraph
+    closeList();
+    out.push(`<p>${renderInline(line)}</p>`);
+    i++;
   }
-  if (inList) out.push('</ul>');
-  if (inCode) out.push('</pre>');
-  return `<!doctype html><meta charset="utf-8"><title>Facilitator — InsureSim v4</title>
-<style>body{font-family:system-ui,sans-serif;max-width:780px;margin:40px auto;padding:0 20px;color:#222;line-height:1.55}
-h1{font-size:28px;border-bottom:1px solid #ddd;padding-bottom:8px}h2{font-size:20px;margin-top:32px}h3{font-size:16px;color:#555}
-pre{background:#f6f8fa;padding:12px;border-radius:6px;overflow:auto;font-size:13px}li{margin:4px 0}p{margin:8px 0}</style>
+  closeList();
+  if (inCode) out.push('</code></pre>');
+
+  const printableUrl = `/facilitator/printable?token=${encodeURIComponent(token || '')}`;
+  const factsheetsUrl = `/facilitator/factsheets?token=${encodeURIComponent(token || '')}`;
+  const logUrl = `/api/admin/log?token=${encodeURIComponent(token || '')}`;
+
+  return `<!doctype html><meta charset="utf-8"><title>Facilitator — InsureSim v5</title>
+<style>
+body{font-family:system-ui,-apple-system,'Segoe UI',sans-serif;max-width:840px;margin:20px auto;padding:20px;color:#222;line-height:1.6;background:#fafbfc}
+.toolbar{position:sticky;top:0;background:#fff;border:1px solid #e3e6ea;border-radius:6px;padding:10px 14px;margin-bottom:20px;display:flex;gap:10px;flex-wrap:wrap;box-shadow:0 1px 3px rgba(0,0,0,0.04)}
+.toolbar a,.toolbar button{background:#2c5aa0;color:#fff;text-decoration:none;padding:6px 12px;border-radius:4px;font-size:13px;border:none;cursor:pointer;font-family:inherit}
+.toolbar a:hover,.toolbar button:hover{background:#244a8a}
+.toolbar a.secondary{background:#fff;color:#2c5aa0;border:1px solid #2c5aa0}
+h1{font-size:28px;border-bottom:2px solid #2c5aa0;padding-bottom:8px;margin-top:20px}
+h2{font-size:20px;margin-top:32px;color:#111}
+h3{font-size:15px;color:#555;text-transform:uppercase;letter-spacing:0.06em;margin-top:20px}
+h4{font-size:14px;color:#666;margin-top:16px}
+pre{background:#f6f8fa;padding:12px;border-radius:6px;overflow:auto;font-size:13px;border:1px solid #e3e6ea}
+code{background:#f6f8fa;padding:2px 6px;border-radius:3px;font-size:13px;font-family:'SF Mono',Menlo,monospace}
+li{margin:4px 0}p{margin:10px 0}hr{border:none;border-top:1px solid #e3e6ea;margin:24px 0}
+table{border-collapse:collapse;width:100%;margin:12px 0;font-size:14px}
+th{background:#f0f2f5;text-align:left;padding:8px 10px;border-bottom:2px solid #d0d4da;font-weight:600}
+td{padding:7px 10px;border-bottom:1px solid #eef0f2;vertical-align:top}
+tr:nth-child(even) td{background:#fafbfc}
+a{color:#2c5aa0}
+@media print {
+  .toolbar{display:none}
+  body{background:#fff;max-width:100%;padding:0}
+  h1{break-after:avoid}h2,h3{break-after:avoid}
+  tr{break-inside:avoid}pre{break-inside:avoid}
+}
+</style>
+<div class="toolbar">
+  <button onclick="window.print()">🖨 Print / Save as PDF</button>
+  <a href="${printableUrl}" class="secondary">Open in printable layout</a>
+  <a href="${factsheetsUrl}" class="secondary">5 cover fact sheets</a>
+  <a href="${logUrl}" class="secondary">Session log</a>
+</div>
+${out.join('\n')}`;
+}
+
+// v5: printable variant — same markdown, minimal chrome, print dialog on load.
+app.get('/facilitator/printable', (req, res) => {
+  if (!ADMIN_TOKEN) return res.status(503).set('Content-Type', 'text/html').send(renderGatePage({ title: 'Disabled', body: '<p>Set ADMIN_TOKEN.</p>' }));
+  if (req.query.token !== ADMIN_TOKEN) return res.status(401).set('Content-Type', 'text/html').send(renderGatePage({ title: 'Unauthorized', body: '<p>Token required.</p>' }));
+  const p = join(__dirname, 'docs', 'FACILITATOR_CHEATSHEET.md');
+  if (!existsSync(p)) return res.status(404).send('Cheatsheet source missing.');
+  const md = readFileSync(p, 'utf-8');
+  res.set('Content-Type', 'text/html; charset=utf-8').send(renderCheatsheetPrintable(md));
+});
+
+function renderCheatsheetPrintable(md) {
+  // Reuse renderCheatsheetHtml by stripping the toolbar and auto-calling print.
+  // Simplest approach: wrap in print-optimized doc.
+  const escText = s => String(s || '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+  // Quick-and-simple — use same tokenizer as the HTML version but without the toolbar
+  const inline = s => {
+    let out = escText(s);
+    out = out.replace(/`([^`]+)`/g, (_, c) => `<code>${c}</code>`);
+    out = out.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
+    return out;
+  };
+  const lines = String(md || '').split('\n');
+  const out = [];
+  let inCode = false, inList = false, listTag = 'ul';
+  const closeList = () => { if (inList) { out.push(`</${listTag}>`); inList = false; } };
+  let i = 0;
+  while (i < lines.length) {
+    const line = lines[i];
+    if (line.startsWith('```')) { closeList(); out.push(inCode ? '</code></pre>' : '<pre><code>'); inCode = !inCode; i++; continue; }
+    if (inCode) { out.push(escText(line)); i++; continue; }
+    if (/\|/.test(line) && i + 1 < lines.length && /^[\s|:-]+$/.test(lines[i + 1]) && /\|/.test(lines[i + 1])) {
+      closeList();
+      const header = line.split('|').map(s => s.trim()).filter((s, idx, arr) => !(idx === 0 && s === '') && !(idx === arr.length - 1 && s === ''));
+      i += 2;
+      const rows = [];
+      while (i < lines.length && /\|/.test(lines[i]) && lines[i].trim().length > 0) {
+        const cells = lines[i].split('|').map(s => s.trim()).filter((s, idx, arr) => !(idx === 0 && s === '') && !(idx === arr.length - 1 && s === ''));
+        rows.push(cells); i++;
+      }
+      out.push('<table><thead><tr>' + header.map(h => `<th>${inline(h)}</th>`).join('') + '</tr></thead><tbody>' + rows.map(r => '<tr>' + r.map(c => `<td>${inline(c)}</td>`).join('') + '</tr>').join('') + '</tbody></table>');
+      continue;
+    }
+    if (/^---+\s*$/.test(line)) { closeList(); out.push('<hr>'); i++; continue; }
+    const hMatch = /^(#{1,4})\s+(.*)$/.exec(line);
+    if (hMatch) { closeList(); out.push(`<h${hMatch[1].length}>${inline(hMatch[2])}</h${hMatch[1].length}>`); i++; continue; }
+    const ulMatch = /^\s*[-*]\s+(.*)$/.exec(line);
+    if (ulMatch) { if (!inList || listTag !== 'ul') { closeList(); out.push('<ul>'); inList = true; listTag = 'ul'; } out.push(`<li>${inline(ulMatch[1])}</li>`); i++; continue; }
+    if (line.trim() === '') { closeList(); i++; continue; }
+    closeList();
+    out.push(`<p>${inline(line)}</p>`);
+    i++;
+  }
+  closeList();
+  return `<!doctype html><meta charset="utf-8"><title>Facilitator cheatsheet — printable</title>
+<style>body{font-family:Georgia,'Times New Roman',serif;max-width:720px;margin:20mm auto;padding:0 20px;color:#000;line-height:1.5;font-size:12pt}
+h1{font-size:20pt;border-bottom:2px solid #000;padding-bottom:6px}h2{font-size:15pt;margin-top:20pt}h3{font-size:12pt;text-transform:uppercase;letter-spacing:0.05em}
+pre{background:#f4f4f4;padding:10px;font-family:'Courier New',monospace;font-size:10pt;border:1px solid #ccc}
+code{background:#f4f4f4;padding:1px 4px;font-family:'Courier New',monospace;font-size:11pt}
+table{border-collapse:collapse;width:100%;margin:12px 0;font-size:11pt}th{background:#ddd;padding:6px;border:1px solid #999;text-align:left}
+td{padding:5px 6px;border:1px solid #ccc;vertical-align:top}
+@media print{body{margin:0;padding:15mm}h1,h2,h3{break-after:avoid}tr{break-inside:avoid}}</style>
+<script>window.addEventListener('load',()=>setTimeout(()=>window.print(),300))</script>
 ${out.join('\n')}`;
 }
 
@@ -571,7 +823,7 @@ app.use((req, res) => {
 });
 
 app.listen(PORT, () => {
-  console.log(`InsureSim v4 running on port ${PORT}`);
+  console.log(`InsureSim v5 running on port ${PORT}`);
   console.log(`Model: ${DEEPSEEK_MODEL}`);
   console.log(`Admin export: ${ADMIN_TOKEN ? 'enabled' : 'disabled'}`);
   console.log(`Covers loaded: ${COVER_KEYS.join(', ')}`);

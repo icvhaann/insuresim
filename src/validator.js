@@ -86,6 +86,175 @@ export function regexGroundingCheck(ivanReply, conversationHistory, latestSeller
 }
 
 // ─────────────────────────────────────────────────────────────
+// v5: ANTI-REPETITION check.
+// Tokenize Ivan's proposed reply and the last few Ivan replies. Compute Jaccard
+// similarity on word-sets; if the new reply is too close to a recent one (Ivan
+// is literally repeating himself like the Image 1 bug), flag it.
+//
+// Cheap and synchronous. No LLM call.
+// ─────────────────────────────────────────────────────────────
+const STOPWORDS = new Set([
+  'a','an','the','is','am','are','was','were','be','been','being',
+  'i','you','he','she','it','we','they','me','him','her','us','them',
+  'my','your','his','its','our','their',
+  'of','in','on','at','to','for','with','by','from','as','and','or','but','if','then','so',
+  'this','that','these','those','there',
+  'do','does','did','have','has','had','can','could','would','should','will',
+  'ok','okay','yeah','nah','lol','ngl','tbh','hmm','la','lor','ah',
+]);
+
+function tokenSet(s) {
+  return new Set(
+    String(s || '')
+      .toLowerCase()
+      .replace(/[^a-z0-9\s]/g, ' ')
+      .split(/\s+/)
+      .filter(w => w.length > 2 && !STOPWORDS.has(w))
+  );
+}
+
+function jaccard(a, b) {
+  if (a.size === 0 || b.size === 0) return 0;
+  let inter = 0;
+  for (const x of a) if (b.has(x)) inter++;
+  const union = a.size + b.size - inter;
+  return union === 0 ? 0 : inter / union;
+}
+
+// conversationHistory is the trimmed history array. Look at the last N Ivan
+// replies (role 'assistant') and check if the proposed reply is too similar.
+// Threshold 0.70 — aggressive enough to catch "same paraphrase" cases.
+// Also catches EXACT matches.
+export function antiRepetitionCheck(ivanReply, conversationHistory, threshold = 0.70, lookback = 3) {
+  if (!ivanReply || typeof ivanReply !== 'string') return { ok: true };
+  const proposedTokens = tokenSet(ivanReply);
+  if (proposedTokens.size < 3) return { ok: true };  // too short to meaningfully flag
+
+  const priorIvanReplies = (conversationHistory || [])
+    .filter(m => m.role === 'assistant')
+    .slice(-lookback)
+    .map(m => m.content);
+
+  for (const prior of priorIvanReplies) {
+    // Exact match first
+    if (String(prior || '').trim().toLowerCase() === String(ivanReply).trim().toLowerCase()) {
+      return {
+        ok: false,
+        issue: {
+          kind: 'verbatim_repetition',
+          description: `Ivan's reply is an exact repetition of a prior reply`,
+          similar_to: prior.slice(0, 80),
+          similarity: 1.0,
+        },
+      };
+    }
+    const priorTokens = tokenSet(prior);
+    const sim = jaccard(proposedTokens, priorTokens);
+    if (sim >= threshold) {
+      return {
+        ok: false,
+        issue: {
+          kind: 'near_duplicate_repetition',
+          description: `Ivan's reply is too similar to a prior reply (Jaccard=${sim.toFixed(2)})`,
+          similar_to: prior.slice(0, 80),
+          similarity: sim,
+        },
+      };
+    }
+  }
+  return { ok: true };
+}
+
+// ─────────────────────────────────────────────────────────────
+// v5: WILD-CLAIM check.
+// Ivan shouldn't invent product features, competitor names, regulatory info, or
+// specific medical/financial figures unless they were stated by the seller OR
+// are explicitly part of his privacy-taxonomy-allowed self-knowledge.
+//
+// This is a lightweight pattern check — NOT a full knowledge audit. Designed to
+// catch common DeepSeek failure modes where the persona makes up plausible
+// sounding but un-grounded facts.
+// ─────────────────────────────────────────────────────────────
+const WILD_CLAIM_PATTERNS = [
+  {
+    re: /\b(fwd|aia|manulife|axa|prudential|china\s*life|bupa|cigna|bluecross)\b/i,
+    kind: 'invented_competitor',
+    description: 'Ivan referenced a specific insurer/competitor brand he was never told about',
+  },
+  {
+    re: /\b(sec|sfc|ia\s*license|insurance\s*authority|hkma)\s*(approved|regulated|licensed|certified)/i,
+    kind: 'invented_regulator_claim',
+    description: 'Ivan referenced specific regulatory approval not stated by seller',
+  },
+  {
+    re: /\b\d{1,3}\s*(?:%|percent)\s*(coverage|payout|reimburse|discount|off|cheaper)/i,
+    kind: 'invented_percentage_claim',
+    description: 'Ivan stated a specific % claim (payout, discount) not mentioned by seller',
+  },
+  {
+    re: /\b(guaranteed|lifetime|unlimited)\s*(coverage|cover|payout|benefit)/i,
+    kind: 'invented_absolute_claim',
+    description: 'Ivan used absolute product-feature language (guaranteed / lifetime / unlimited)',
+  },
+  {
+    re: /\bcovers?\s*(everything|all|anything)\b/i,
+    kind: 'invented_scope_claim',
+    description: 'Ivan claimed the product covers "everything" — unsupported by anything said',
+  },
+  {
+    re: /\b(hkd?|hk\$)\s*\d{3,}|\$\s*\d{3,}/i,
+    kind: 'invented_specific_amount',
+    description: 'Ivan invented a specific 3+ digit HKD amount',
+  },
+];
+
+export function wildClaimCheck(ivanReply, conversationHistory, latestSellerMsg) {
+  if (!ivanReply || typeof ivanReply !== 'string') return { ok: true, issues: [] };
+  const corpus = sellerCorpus(conversationHistory, latestSellerMsg).toLowerCase();
+  const issues = [];
+
+  // Segment Ivan's reply into sentences/clauses. Only flag assertive segments,
+  // not questions. "does it cover everything?" is fine; "it covers everything"
+  // is not.
+  const segments = String(ivanReply).split(/[?!.;]+/).map(s => s.trim()).filter(Boolean);
+  const reply = String(ivanReply);
+  // Treat the whole message as "question-mode" if >= 50% of segments end with ?
+  const hasSegmentWithQuestionMark = String(ivanReply).includes('?');
+
+  for (const chk of WILD_CLAIM_PATTERNS) {
+    const m = chk.re.exec(reply);
+    if (!m) continue;
+    // Find which segment the match is in
+    let matchIdx = m.index;
+    let cumulative = 0;
+    let segmentIsAssertion = true;
+    for (const seg of segments) {
+      const segStart = reply.indexOf(seg, cumulative);
+      const segEnd = segStart + seg.length;
+      if (matchIdx >= segStart && matchIdx < segEnd) {
+        // Is this segment followed by '?' in the original text?
+        const afterSeg = reply.slice(segEnd, segEnd + 2);
+        if (afterSeg.startsWith('?')) segmentIsAssertion = false;
+        // Also: starts with "does/do/is/are/can/could/what/how/why/when/where" → question
+        const segLower = seg.toLowerCase().trim();
+        if (/^(does|do|is|are|can|could|what|how|why|when|where|who|will|would|should|any\s|got\s)/.test(segLower)) {
+          segmentIsAssertion = false;
+        }
+        break;
+      }
+      cumulative = segEnd;
+    }
+    if (!segmentIsAssertion) continue;
+
+    const matched = m[0].toLowerCase();
+    if (!corpus.includes(matched)) {
+      issues.push({ kind: chk.kind, description: chk.description, phrase: m[0] });
+    }
+  }
+  return { ok: issues.length === 0, issues };
+}
+
+// ─────────────────────────────────────────────────────────────
 // LLM validator. Parallelism is tricky — the reply must exist first. So this
 // is called AFTER the persona response arrives. Total per-turn latency becomes
 // ~ 2× persona latency in the worst case.

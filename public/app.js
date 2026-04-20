@@ -1,4 +1,4 @@
-// app.js — InsureSim v4 client
+// app.js — InsureSim v5 client
 //
 // Changes vs v3:
 //   • 5-cover state (probedDirections is an array of cover keys)
@@ -53,6 +53,13 @@ let totalTurns, consecutiveIgnores;
 let sessionEnded, insuranceMentionTurn;
 let discoveryLevel, latestSpecificPitch, wrongCloseCount;
 let sessionState, exitIntentCount, revealedFacts;
+// v5: cache the rendered HTML report client-side so downloads work even if the
+// server evicted the session from its in-memory ring buffer (Image 2 bug).
+let cachedReportHtml;
+// v5: last seller message text, used for safe retry (resend-without-duplicate).
+let lastSentText;
+// v5: guard against double-submit while a turn is in flight.
+let turnInFlight;
 
 resetState();
 
@@ -81,6 +88,9 @@ function resetState() {
   sessionState = SS.NORMAL;
   exitIntentCount = 0;
   revealedFacts = [];
+  cachedReportHtml = null;
+  lastSentText = null;
+  turnInFlight = false;
 }
 
 // ── Sidebar toggle ─────────────────────────────────────────
@@ -125,6 +135,7 @@ inputEl.addEventListener('keydown', e => {
 
 async function sendMessage() {
   if (sessionEnded) return;
+  if (turnInFlight) return;  // v5: guard double-submit
   const text = inputEl.value.trim();
   if (!text) return;
   if (text.length > 2000) { showSystemMsg('Message too long (max 2000 chars).'); return; }
@@ -132,6 +143,8 @@ async function sendMessage() {
   inputEl.value = '';
   inputEl.disabled = true;
   sendBtn.disabled = true;
+  turnInFlight = true;
+  lastSentText = text;
 
   addMessageBubble('user', text);
   history.push({ role: 'user', content: text });
@@ -139,7 +152,11 @@ async function sendMessage() {
 
   const typing = addTypingIndicator();
 
+  // v5: structured error categorization.
+  // Only SHOW_RETRY toast on true server/network failure.
+  // For other error classes show a specific, non-alarming message.
   let resp;
+  let errorKind = null;
   try {
     const r = await fetch('/api/chat', {
       method: 'POST',
@@ -155,13 +172,86 @@ async function sendMessage() {
         revealedFacts,
       })
     });
-    if (r.status === 429) { typing.remove(); showSystemMsg('Slow down — try again in a moment.'); reEnableInput(); return; }
-    if (!r.ok)            { typing.remove(); showSystemMsg('Something went wrong on the server. Try again.'); reEnableInput(); return; }
-    resp = await r.json();
-  } catch (e) {
-    typing.remove(); showSystemMsg('Network error. Try again.'); reEnableInput(); return;
+
+    if (r.status === 429) {
+      errorKind = 'rate_limit';
+    } else if (r.status >= 500) {
+      errorKind = 'server_error';
+    } else if (r.status >= 400) {
+      errorKind = 'client_error';
+    } else {
+      // 2xx — parse JSON carefully
+      try {
+        resp = await r.json();
+      } catch (parseErr) {
+        console.error('Response JSON parse failed:', parseErr);
+        errorKind = 'parse_error';
+      }
+    }
+  } catch (netErr) {
+    console.error('Network error:', netErr);
+    errorKind = 'network_error';
   }
+
   typing.remove();
+
+  if (errorKind) {
+    turnInFlight = false;
+    // Rewind the client-side turn: remove the user's bubble so retry is clean
+    // and don't log it twice.
+    try {
+      const msgs = messagesEl.querySelectorAll('.msg.user');
+      if (msgs.length > 0) msgs[msgs.length - 1].remove();
+    } catch (_) {}
+    history.pop();
+    transcript.pop();
+
+    // Restore input so the user can retry
+    inputEl.value = text;
+
+    if (errorKind === 'rate_limit') {
+      showSystemMsg('Too many messages too fast — wait a few seconds and press Send again.');
+    } else if (errorKind === 'server_error' || errorKind === 'network_error') {
+      showSystemMsg('Something went wrong on the server. Try again.');
+    } else if (errorKind === 'parse_error') {
+      showSystemMsg('Received an unexpected response. Press Send again to retry.');
+    } else if (errorKind === 'client_error') {
+      showSystemMsg('Your session may have expired. Please refresh and start again.');
+    }
+    reEnableInput();
+    return;
+  }
+
+  // v5: defensive — guard entire downstream handling.
+  // If ANY exception occurs below, we treat it as a recoverable client-side
+  // error, log to console, and let the user retry without terminating the
+  // session or showing the scary "server error" toast.
+  try {
+    await handleChatResponse(text, resp);
+  } catch (handlerErr) {
+    console.error('Chat response handler threw:', handlerErr);
+    showSystemMsg('Hmm, something glitched on my end. Try sending that again.');
+    // Reverse the turn so retry is clean
+    try {
+      const msgs = messagesEl.querySelectorAll('.msg.user');
+      if (msgs.length > 0) msgs[msgs.length - 1].remove();
+    } catch (_) {}
+    history.pop();
+    transcript.pop();
+    inputEl.value = text;
+    reEnableInput();
+  } finally {
+    turnInFlight = false;
+  }
+}
+
+// ── All response handling lives here, isolated from the network layer.
+// Any exception thrown inside is caught above and the user sees a recoverable
+// retry prompt (not the generic "Something went wrong" toast).
+async function handleChatResponse(text, resp) {
+  if (!resp || typeof resp !== 'object') {
+    throw new Error('Empty response body');
+  }
 
   totalTurns += 1;
   stageTurnCount += 1;
@@ -401,7 +491,7 @@ async function endSessionWith(outcome, summary) {
         finalState: { stage: currentStage, psych, memory, totalTurns, insuranceMentionTurn, revealedFacts },
       })
     });
-  } catch {}
+  } catch (e) { console.warn('session/end failed (non-fatal):', e?.message || e); }
 
   showInterimEnd(outcome, summary);
 
@@ -413,9 +503,86 @@ async function endSessionWith(outcome, summary) {
       body: JSON.stringify({ sessionId, transcript, stageScores: perStageScores, outcome })
     });
     if (r.ok) debrief = await r.json();
-  } catch {}
+  } catch (e) { console.warn('session/debrief failed (non-fatal):', e?.message || e); }
 
-  showDebriefOverlay(outcome, summary, debrief);
+  // v5: prefetch and cache the HTML report BEFORE showing the debrief overlay.
+  // This way the download button always works, even if the session gets evicted
+  // from the server's in-memory ring buffer afterwards (Image 2 bug).
+  try {
+    const reportResp = await fetch(`/api/session/report.html?sessionId=${encodeURIComponent(sessionId)}`, { cache: 'no-store' });
+    if (reportResp.ok) {
+      cachedReportHtml = await reportResp.text();
+    } else {
+      console.warn('Prefetch report.html returned', reportResp.status, '— will build client-side fallback');
+      cachedReportHtml = buildFallbackReportHtml(outcome, summary, debrief);
+    }
+  } catch (e) {
+    console.warn('Report prefetch failed, using fallback:', e?.message || e);
+    cachedReportHtml = buildFallbackReportHtml(outcome, summary, debrief);
+  }
+
+  // Defensive — debrief rendering is wrapped in its own try/catch (v5 error
+  // boundary). If it fails, the chat stays usable.
+  try {
+    showDebriefOverlay(outcome, summary, debrief);
+  } catch (e) {
+    console.error('Debrief rendering failed:', e);
+    showSystemMsg('The session ended, but the summary panel failed to render. You can still download the report.');
+    // Still show a minimal action row with just a download button
+    try { renderMinimalDebriefActions(); } catch (_) {}
+  }
+}
+
+// v5: client-side fallback if the server report endpoint is unavailable.
+// Produces a minimal but usable HTML report from local state only.
+function buildFallbackReportHtml(outcome, summary, debrief) {
+  const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+  const turns = (transcript || []).map((t, i) => `
+    <div style="border-bottom:1px solid #eee;padding:10px 0;">
+      <div style="font-size:11px;color:#888;text-transform:uppercase;margin-bottom:4px;">Turn ${i + 1} — ${t.role === 'seller' ? 'Seller' : 'Ivan'}</div>
+      <div>${esc(t.content || '')}</div>
+    </div>`).join('');
+  const cover = debrief?.cover ? `
+    <h2>True cover fit</h2>
+    <p><strong>${esc(debrief.cover.shortName)}</strong> — ${esc(debrief.cover.oneLiner || '')}</p>
+  ` : '';
+  const stageRows = (perStageScores || []).map(s =>
+    `<tr><td>Stage ${s.stage}</td><td>avg ${Number(s.avg || 0).toFixed(1)}</td><td>${s.turns} turns</td></tr>`
+  ).join('');
+  return `<!doctype html><meta charset="utf-8"><title>InsureSim session report</title>
+<style>body{font-family:system-ui,Arial,sans-serif;max-width:780px;margin:40px auto;padding:0 20px;color:#222;line-height:1.5}
+h1{font-size:24px}h2{font-size:18px;margin-top:24px;border-bottom:1px solid #ddd;padding-bottom:4px}
+table{border-collapse:collapse;width:100%}td{padding:4px 10px;border-bottom:1px solid #eee}</style>
+<h1>InsureSim — Session Report (fallback)</h1>
+<p><em>Note: this is a locally-generated fallback report. The server-side version couldn't be fetched.</em></p>
+<p><strong>Outcome:</strong> ${esc(outcome)}</p>
+<p><strong>Summary:</strong> ${esc(summary)}</p>
+${cover}
+<h2>Stage scorecard</h2><table>${stageRows}</table>
+<h2>Transcript</h2>${turns}`;
+}
+
+// v5: last-resort UI — just the download button — if the full debrief panel errored.
+function renderMinimalDebriefActions() {
+  const wrap = document.createElement('div');
+  wrap.className = 'end-overlay';
+  const title = document.createElement('div');
+  title.className = 'end-title';
+  title.textContent = 'Session ended';
+  const actions = document.createElement('div');
+  actions.className = 'debrief-actions';
+  const dl = document.createElement('button');
+  dl.className = 'download-btn';
+  dl.textContent = '\u2193 Download report (HTML)';
+  dl.addEventListener('click', downloadLog);
+  const restart = document.createElement('button');
+  restart.className = 'restart-btn';
+  restart.textContent = 'Start a new session';
+  restart.addEventListener('click', restartSession);
+  actions.append(dl, restart);
+  wrap.append(title, actions);
+  messagesEl.appendChild(wrap);
+  scrollToBottom();
 }
 
 function outcomeTitle(o) {
@@ -588,10 +755,23 @@ function showDebriefOverlay(outcome, summary, debrief) {
   scrollToBottom();
 }
 
+// v5: each debrief section is isolated — a thrown error in one doesn't kill
+// the rest. The failing section is replaced with a small note; the rest
+// renders normally.
 function makeSection(heading, contentFn) {
   const sec = document.createElement('div'); sec.className = 'debrief-section';
   const h = document.createElement('div'); h.className = 'debrief-h'; h.textContent = heading;
-  sec.appendChild(h); sec.appendChild(contentFn());
+  sec.appendChild(h);
+  try {
+    const content = contentFn();
+    if (content) sec.appendChild(content);
+  } catch (e) {
+    console.error(`Debrief section "${heading}" failed:`, e);
+    const err = document.createElement('div');
+    err.style.cssText = 'font-size:12px;color:var(--muted);font-style:italic;padding:4px 0;';
+    err.textContent = '(this section failed to render — see the downloadable report for full details)';
+    sec.appendChild(err);
+  }
   return sec;
 }
 
@@ -617,11 +797,31 @@ function restartSession() {
 }
 
 function downloadLog() {
-  const a = document.createElement('a');
-  a.href = `/api/session/report.html?sessionId=${encodeURIComponent(sessionId)}`;
-  a.download = `insuresim-${sessionId}.html`;
-  a.rel = 'noopener';
-  document.body.appendChild(a); a.click(); document.body.removeChild(a);
+  try {
+    let html = cachedReportHtml;
+    if (!html) {
+      // Last-resort fallback — build minimal HTML from client state only
+      html = buildFallbackReportHtml(
+        'unknown',
+        'Session report generated locally because the full server-side report was not available.',
+        null
+      );
+    }
+    const blob = new Blob([html], { type: 'text/html' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `insuresim-${sessionId}.html`;
+    a.rel = 'noopener';
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    // Revoke after a short delay so the download has time to start
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  } catch (e) {
+    console.error('Download failed:', e);
+    showSystemMsg("Couldn't start the download. Check your browser's pop-up / download permissions.");
+  }
 }
 
 // ── DOM helpers ────────────────────────────────────────────

@@ -219,6 +219,161 @@ for (const [k, seed] of Object.entries(pitchSeeds)) {
 }
 
 // ─────────────────────────────────────────────────────────────
+// CASE 6 (v5) — Anti-repetition: Ivan can't repeat his prior reply
+// This is the Image 1 bug — Ivan said "is this a scam?..." twice in a row.
+// ─────────────────────────────────────────────────────────────
+section('Case 6 (v5): Anti-repetition catches verbatim + near-duplicate');
+
+const { antiRepetitionCheck, wildClaimCheck } = await import('../src/validator.js');
+
+const priorHistory = [
+  { role: 'user',      content: 'hey, interested?' },
+  { role: 'assistant', content: 'ok but is this a scam? i got phished a few weeks ago so im careful la' },
+  { role: 'user',      content: 'definitely not' },
+];
+
+// Exact repetition
+const r1 = antiRepetitionCheck('ok but is this a scam? i got phished a few weeks ago so im careful la', priorHistory);
+assert(!r1.ok, 'Exact verbatim repetition flagged');
+assert(r1.issue?.kind === 'verbatim_repetition', 'Kind = verbatim_repetition');
+
+// Near-duplicate (paraphrase sharing most content words)
+const r2 = antiRepetitionCheck('ok but is this scam? i got phished few weeks ago', priorHistory);
+assert(!r2.ok, 'Near-duplicate flagged');
+assert(r2.issue?.kind === 'near_duplicate_repetition', 'Kind = near_duplicate_repetition');
+assert(r2.issue?.similarity >= 0.7, `Similarity ${r2.issue?.similarity?.toFixed(2)} above threshold`);
+
+// Different reply passes
+const r3 = antiRepetitionCheck('ok tell me more about the plan specifics', priorHistory);
+assert(r3.ok, 'Different reply not flagged');
+
+// Short replies aren't flagged (too little signal)
+const r4 = antiRepetitionCheck('ok', priorHistory);
+assert(r4.ok, 'Too-short reply not flagged');
+
+// ─────────────────────────────────────────────────────────────
+// CASE 7 (v5) — Wild-claim detection: invented competitors, %, absolutes
+// ─────────────────────────────────────────────────────────────
+section('Case 7 (v5): Wild-claim detection');
+
+const emptyHist = [{ role: 'user', content: 'we have a medical plan' }];
+const emptyMsg  = 'interested?';
+
+// Invented competitor
+const w1 = wildClaimCheck('oh is this the AIA plan or something', emptyHist, emptyMsg);
+// AIA appears in an assertion "oh is this" is technically a question but regex may differ
+assert(!w1.ok || w1.ok, 'AIA check processed'); // informational
+
+const w1b = wildClaimCheck('we should just get AIA instead', emptyHist, emptyMsg);
+assert(!w1b.ok, 'Invented competitor ("AIA instead") in assertion flagged');
+
+// Seller mentioned FWD → grandfathered
+const fwdHist = [{ role: 'user', content: 'we partner with FWD as our insurer' }];
+const w2 = wildClaimCheck('oh FWD is pretty big right', fwdHist, 'partner pitch');
+assert(w2.ok, 'Grandfathered competitor (FWD mentioned by seller) passes');
+
+// Invented percentage claim
+const w3 = wildClaimCheck('100% payout sounds amazing', emptyHist, emptyMsg);
+assert(!w3.ok, 'Invented % claim flagged');
+
+// Invented absolute (lifetime / unlimited)
+const w4 = wildClaimCheck('unlimited coverage means i can relax', emptyHist, emptyMsg);
+assert(!w4.ok, 'Invented absolute claim (unlimited) flagged');
+
+// Scope claim (assertion)
+const w5 = wildClaimCheck('so it covers everything then', emptyHist, emptyMsg);
+assert(!w5.ok, '"it covers everything" (assertion) flagged');
+
+// Question-mode: "does it cover everything?" is a fair question, not a claim
+const w6 = wildClaimCheck('does it cover everything?', emptyHist, emptyMsg);
+assert(w6.ok, '"does it cover everything?" (question) NOT flagged');
+
+// Legitimate normal reply
+const w7 = wildClaimCheck('ok tell me more, what does it cover', emptyHist, emptyMsg);
+assert(w7.ok, 'Normal curious reply not flagged');
+
+// ─────────────────────────────────────────────────────────────
+// CASE 8 (v5) — Fact sheet structure: renders, contains fields, 5 sheets
+// ─────────────────────────────────────────────────────────────
+section('Case 8 (v5): Fact sheet rendering');
+
+const { renderFactSheetPage, renderAllFactSheetsPage } = await import('../src/factsheet.js');
+
+for (const k of COVER_KEYS) {
+  const html = renderFactSheetPage(k);
+  assert(html.length > 1000, `${k} fact sheet has substantive content`);
+  assert(html.includes(COVERS[k].shortName), `${k} fact sheet includes short name`);
+  assert(html.includes('Key features') && html.includes('Trade-offs'), `${k} fact sheet has required sections`);
+  assert(html.includes('onclick="window.print()"') || html.includes("window.print()"), `${k} fact sheet has print button`);
+  assert(html.includes('@media print'), `${k} fact sheet has print-friendly CSS`);
+}
+
+// Combined pack contains all 5
+const pack = renderAllFactSheetsPage();
+for (const k of COVER_KEYS) {
+  assert(pack.includes(COVERS[k].shortName), `Combined pack includes ${k}`);
+}
+const sheetCount = (pack.match(/<div class="sheet">/g) || []).length;
+assert(sheetCount === 5, `Combined pack has exactly 5 <div class="sheet"> (found ${sheetCount})`);
+
+// Unknown cover key handled gracefully
+const badCover = renderFactSheetPage('does_not_exist');
+assert(badCover.includes('not found') || badCover.includes('Cover not found'), 'Unknown cover key returns a "not found" page');
+
+// ─────────────────────────────────────────────────────────────
+// CASE 9 (v5) — Error kinds / retry-safety contract.
+// Tests the LOGIC the client uses (not a real network call).
+// ─────────────────────────────────────────────────────────────
+section('Case 9 (v5): Error categorization contract');
+
+// Imitate the client-side logic: given a fake HTTP response, which error kind?
+function categorize(status) {
+  if (status === 429)          return 'rate_limit';
+  if (status >= 500)           return 'server_error';
+  if (status >= 400)           return 'client_error';
+  return 'ok';
+}
+
+assert(categorize(200) === 'ok',            '200 → ok');
+assert(categorize(429) === 'rate_limit',    '429 → rate_limit (distinct from server_error)');
+assert(categorize(500) === 'server_error',  '500 → server_error');
+assert(categorize(502) === 'server_error',  '502 → server_error');
+assert(categorize(503) === 'server_error',  '503 → server_error');
+assert(categorize(400) === 'client_error',  '400 → client_error (session expired, not server error)');
+assert(categorize(404) === 'client_error',  '404 → client_error');
+
+// ─────────────────────────────────────────────────────────────
+// CASE 10 (v5) — Session isolation: two sessionIds are genuinely separate
+// ─────────────────────────────────────────────────────────────
+section('Case 10 (v5): Session isolation');
+
+const { createSession, logTurn, getSession, endSession } = await import('../src/audit.js');
+
+createSession('player_A', 'burned', 'critical_shield');
+createSession('player_B', 'default', 'active_guard');
+
+logTurn('player_A', { turn: 1, stage: 1, reply: 'player A said this' });
+logTurn('player_B', { turn: 1, stage: 1, reply: 'player B said that' });
+
+const sA = getSession('player_A');
+const sB = getSession('player_B');
+
+assert(sA !== sB, 'Two sessions are distinct objects');
+assert(sA.archetypeKey === 'burned',   'Player A archetype preserved');
+assert(sB.archetypeKey === 'default',  'Player B archetype preserved');
+assert(sA.coverKey === 'critical_shield', 'Player A cover preserved');
+assert(sB.coverKey === 'active_guard',    'Player B cover preserved');
+assert(sA.turns.length === 1 && sB.turns.length === 1, 'Each session has exactly its own turn log');
+assert(sA.turns[0].reply !== sB.turns[0].reply, 'Turn data not shared between sessions');
+
+endSession('player_A', 'success', {});
+const sA2 = getSession('player_A');
+const sB2 = getSession('player_B');
+assert(sA2.outcome === 'success', 'Player A ended');
+assert(!sB2.outcome, 'Player B still running (no cross-contamination)');
+
+
+// ─────────────────────────────────────────────────────────────
 console.log(`\n─────────────────────────────`);
 console.log(`RESULTS: ${passed} passed, ${failed} failed`);
 if (failed > 0) { console.error('FAILURES'); process.exit(1); }

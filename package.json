@@ -1,7 +1,7 @@
 {
   "name": "insuresim",
-  "version": "4.0.0",
-  "description": "Internal sales-training simulator. v4: 5-cover catalog, state machine, grounding validator.",
+  "version": "5.0.0",
+  "description": "Internal sales-training simulator. v5: reinforced validation (anti-repetition + wild-claim), fact sheets, error boundaries, robust downloads.",
   "type": "module",
   "main": "server.js",
   "scripts": {
