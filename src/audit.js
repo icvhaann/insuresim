@@ -1,22 +1,20 @@
 // src/audit.js
 // In-memory ring-buffered session log. Ephemeral — clears on restart.
-// Consumed by the debrief flow, the per-session HTML download, and the facilitator
-// HTML export endpoint.
+// Consumed by the debrief flow, the per-session HTML download, and the
+// facilitator HTML export endpoint.
+//
+// v4: tracks coverKey (one of 5 covers) instead of v3's insuranceNeedKey.
 
 const MAX_SESSIONS = 200;
 const sessions = new Map();
 const order = [];
 
-export function createSession(sessionId, archetypeKey, insuranceNeedKey) {
+export function createSession(sessionId, archetypeKey, coverKey) {
   if (sessions.has(sessionId)) return;
   sessions.set(sessionId, {
-    sessionId,
-    archetypeKey,
-    insuranceNeedKey,
-    startedAt: Date.now(),
-    endedAt: null,
-    outcome: null,
-    finalState: null,
+    sessionId, archetypeKey, coverKey,
+    startedAt: Date.now(), endedAt: null,
+    outcome: null, finalState: null,
     turns: [],
   });
   order.push(sessionId);

@@ -1,239 +1,204 @@
-# InsureSim — Facilitator Cheatsheet
+# Facilitator Cheatsheet — InsureSim v4
 
-**Audience:** workshop facilitators only. Trainees should not see this document.
-**Access:** `/facilitator?token=YOUR_ADMIN_TOKEN` in the browser (token set via `ADMIN_TOKEN` env var).
+**Workshop-only reference. Do not share with trainees during the session.**
 
----
-
-## 1. What the sim is modelling
-
-Ivan C. (25, HK consultant, just back from the UK) has agreed to take one cold sales message today. The trainee pitches an insurance product through his telecom provider. The trainee must:
-
-1. **Open without being creepy.** Reference a life texture that a stranger could plausibly know without surveillance. Don't pitch insurance in the opening message.
-2. **Cultivate discovery.** Probe Ivan's actual concerns. Two hidden concerns exist in the world — only one is live in this session (picked 50/50 at start).
-3. **Pitch the right product.** Once Ivan's concern is surfaced, pitch the product **type** that actually matches it.
-4. **Earn the close.** Ivan will ask for the link or an agent handoff only after he's genuinely satisfied with what's on offer.
-
-Behind the scenes each session is one of **8 combinations**: `4 archetypes × 2 insurance needs`. Both are hidden from the trainee and revealed only at debrief.
+This document is served at `/facilitator?token=YOUR_ADMIN_TOKEN` as HTML, and also lives here as markdown.
 
 ---
 
-## 2. The 4 archetypes (engagement style)
+## The core puzzle
 
-These control how skeptical / open / distracted Ivan is at the start. Same discovery logic applies to all — only the baseline temperature differs.
+Every session, the simulator assigns Ivan:
+- One of **4 archetypes** (engagement style)
+- One of **5 covers** (true product fit)
 
-| Archetype | Baseline vibe | Tells early on | What to coach |
-|---|---|---|---|
-| **Burned** | Been mis-sold before. High skepticism. | Short replies. References bad past experience. Challenges legitimacy fast. | Acknowledge past frustration explicitly. Slow down. Don't out-talk him. |
-| **Default** | Neutral young professional. | Polite but cool. Waits to see where this goes. | Earn relevance fast but without pressure. |
-| **Slammed** | Swamped at work. | "not a good time", short, impatient. | Be sharp, be useful in one message, don't drag. |
-| **Warm-but-wary** | Friendly but sceptical. | Engages more, but tests with questions. | Don't confuse friendliness with interest. Still earn it. |
+= **20 combinations**. Both are hidden from the trainee until debrief.
 
----
-
-## 3. The 2 insurance needs (product fit)
-
-Only **one** is live per session. The backstory is hidden from the trainee — Ivan only reveals pieces when the seller's questioning earns it (see the **discovery gate** for each variant).
-
-### Variant A — Medical / Hospital Indemnity (MI)
-
-> Ivan rolled his ankle three weeks ago at the SYP indoor sports complex. HKD 4,800 out-of-pocket after a private-clinic X-ray, consult, and physio referral. Group medical only reimbursed 500. His mum had a gallbladder surgery last month — family picked semi-private because private-room top-up was ~HKD 80k. The friend's Niseko ski accident is still in his head. Real unspoken question: *"If I break a leg skiing next year, could I afford a HK private hospital?"*
-
-**Signal phrases to listen for (Ivan will drop these when discovery is earned):**
-- mentions the ankle / SYP / basketball
-- mentions the HKD 4,800 number
-- mentions mum's surgery / semi-private
-- mentions the friend's Niseko story in a new way
-- *"group medical doesn't really cover weekend stuff"*
-
-**Correct pitch direction:**
-- hospital indemnity / hospital cash / daily hospital cash
-- outpatient cover, outpatient rider, outpatient top-up
-- private-room coverage
-- sports-injury rider / personal accident rider
-- top-up to group medical
-- VHIS plans
-
-**Wrong pitch direction (Ivan will soft-reject):**
-- critical illness / early-stage CI / cancer-specific plan
-- lump-sum-on-diagnosis
-- income replacement / income protection
-- heart-attack / stroke cover
-
-### Variant B — Critical Illness (CI)
-
-> Ivan's uncle (52, dad's younger brother) was diagnosed with stage-2 colorectal cancer two months ago. He's in chemo. Ivan's dad has been shaken and keeps making pointed comments ("you young people think you're invincible", "look at your uncle"). Ivan's grandfather died of a heart attack at 58. Dad is 56. Ivan's own recent checkup came back with borderline-elevated cholesterol — it surprised him. Ivan is the only son; sister's still in uni. Real unspoken question: *"If I got something serious at 30, would mum and dad be OK?"*
-
-**Signal phrases to listen for (Ivan will drop these when discovery is earned):**
-- mentions his uncle or the cancer
-- mentions his grandfather or his dad's heart
-- mentions his recent checkup / cholesterol
-- mentions his parents' financial safety
-- *"company plan's fine for day-to-day, it's more the big-scary thing"*
-
-**Correct pitch direction:**
-- critical illness / early-stage CI / multi-claim CI
-- lump sum on diagnosis
-- cancer-specific plan / cancer rider with lump-sum
-- income protection / income replacement
-- dreaded-disease cover
-- whole-life CI
-
-**Wrong pitch direction (Ivan will soft-reject):**
-- hospital indemnity / outpatient rider
-- daily hospital cash
-- sports-injury rider
-- top-up to group medical
-- VHIS plans (solo)
+The trainee's job is to probe the right area, uncover the cover-specific concern, pitch the matching product type, and earn the close. Pitching the wrong cover type gets soft-rejected. Closing the wrong cover fails as `failed_missold`.
 
 ---
 
-## 4. Thematic anchors by stage (what "good" looks like)
+## The 4 archetypes
 
-Stages are revealed to the trainee; anchors are not. Anchors are **topic areas**, not magic phrases — the sim grades for *direction*, not keywords.
-
-### Stage 1 — Hook (rapport, 3–5 turns)
-
-Aim: make Ivan think *"ok this person at least knows who they're talking to"*, without naming specifics he never shared.
-
-**Safe thematic anchors (inferred from telecom CRM data):**
-- returnees / grads just back from overseas
-- young professionals in their mid-20s
-- long hours in Central / professional services
-- weekend-warrior lifestyle (general)
-- people starting out financially in HK
-- the "first real paycheque" moment
-- the post-grad money-stress zone
-
-**What NOT to do at stage 1:**
-- Don't mention insurance at all. (If the trainee does in the first 1–3 turns, there's a real chance Ivan walks with zero reply.)
-- Don't reference a specific run venue, specific gym, specific trip (see §7 privacy breaches).
-- Don't use flattery like "impressive career".
-
-### Stage 2 — Cultivate (discovery, 3–6 turns)
-
-Aim: get Ivan talking. Probe the area where his real concern lives. The sim can't tell the trainee which variant is live — they need to **probe both directions** in early stage 2 and lean into whichever area Ivan opens up about.
-
-**MI-direction probes (will land if Variant A is live):**
-- "does your company plan cover you for sports stuff / weekend injuries?"
-- "have you ever had a bill that surprised you at a private clinic?"
-- "private hospital vs public — have you had to make that choice?"
-- "what's the sublimit on your group plan for outpatient?"
-- "do you do anything at weekends where an injury would be a pain?"
-
-**CI-direction probes (will land if Variant B is live):**
-- "any history of major illness in the family?"
-- "when did you last do a full checkup?"
-- "what would happen if you couldn't work for 6 months?"
-- "who would be financially affected if something big happened to you?"
-- "are you the main provider in your family going forward?"
-
-**Signals Ivan is opening up in the right direction:**
-- Volunteered specifics (ankle / uncle / cholesterol / HKD 4,800 / Niseko)
-- Longer, more candid replies
-- Dropping a detail unprompted
-- Asking *Ivan's* own questions back (engagement climbing)
-
-**Warning signs:**
-- Replies getting shorter → wrong direction or too pushy
-- "nah i'm fine" / "my company plan covers it" → probe-area mismatch, pivot
-- Long pauses / "ignored" replies → too abrupt a pivot
-
-### Stage 3 — Convert (pitch & close, 2–4 turns)
-
-Aim: name the **right product type** and give enough specifics that Ivan can say "ok yes, send the link".
-
-**What "specific enough" looks like:**
-- Name the product category (not just "insurance")
-- Give a ballpark monthly premium range
-- Mention 1–2 key coverage / exclusion details
-- Name how it complements (not replaces) what Ivan already has
-
-**Ivan's close-signals:**
-- "send me the link"
-- "can you connect me with an agent / advisor"
-- "let's set up a call"
-- "I'll take it" / "count me in" / "put me down"
-- "sign me up"
-
-When the seller's last **specific** pitch matches Ivan's need → **success**.
-When it doesn't → **failed_missold**. Ivan may still have said yes because the seller pushed — that's exactly the mis-sell lesson.
-
----
-
-## 5. Outcomes (what the sim records)
-
-| Outcome | When it fires | Debrief flavour |
+| Archetype | Starting trust / skepticism / scam | Defining trait |
 |---|---|---|
-| `success` | Ivan asks for link/handoff AND latest specific pitch matches real need | Strong close, right product, earned rapport |
-| `failed_missold` | Ivan or seller closes on the WRONG product type | Product-fit was wrong — discuss how |
-| `failed_unfocused` | Ivan close-signals but the seller never pitched a specific product type | Ambiguous — Ivan agreed to something unclear |
-| `walked` | Ivan decided to walk after insurance was mentioned too early | Timing problem — he was never going to engage |
-| `failed_optout` | Ivan explicitly asked to be removed / stop / go away | Seller triggered opt-out (tone, pressure, breach) |
-| `failed_ignored` | Ivan stopped replying entirely for 2+ turns | Seller lost him mid-conversation |
-| `failed_stage` | A stage timed out without enough engagement | Didn't earn the transition |
+| **Burned** | 30 / 65 / 20 | Recently phished. Challenges legitimacy within 2–3 turns. Freebies backfire. |
+| **Default** | 50 / 38 / 0 | Curious-pragmatic. Engages if relevance is real. |
+| **Slammed** | 45 / 40 / 10 | Mid-deadline. 1–3 word replies. Walks if pacing is slow. |
+| **Warm-but-wary** | 60 / 30 / 5 | Easy warmth, but privacy breaches land ~1.3× harder. |
 
 ---
 
-## 6. Common failure modes & how to coach
+## The 5 covers
 
-**"Too fast"** — trainee pitches insurance in turn 1–3.
-*Coach:* rapport > relevance > pitch. If Ivan doesn't feel you know who he is, anything you pitch feels transactional.
+All are non-VHIS. Below is what the trainee needs to uncover, what a correct vs wrong pitch looks like, and the signal phrases Ivan may leak if probed well.
 
-**"Shotgun both directions"** — trainee probes MI and CI vocabulary in every stage-2 turn.
-*Coach:* you're spraying. Pick a direction based on the first real signal Ivan gives and go deeper. If you miss, Ivan will push back softly and you can pivot — use that.
+### 1. Starter Protection — Medical, public-healthcare gap
 
-**"Right idea, wrong language"** — trainee describes the concept (e.g. "cover for if something big happens") but never names the product category.
-*Coach:* at stage 3 you have to name it. Ivan can't ask for something he doesn't know the name of.
+**What Ivan is secretly worried about:** Mum's recent gallbladder surgery in a public hospital; a colleague's dengue hospitalisation where HKD 18k went to self-financed drugs.
 
-**"Wrong product, kept pushing"** — trainee pitched the wrong type, Ivan soft-rejected, trainee didn't pivot and tried to close anyway.
-*Coach:* the soft-rejection line ("tbh that's not really what's on my mind") is a gift. It tells you you're in the wrong direction. Pivot the product type, not the volume.
+**Trainee should probe:** "Ever spent time in a public hospital?", "Have you or family dealt with long queue times?", "Ever had a bill for self-financed drugs?", "What's your view on private vs public hospital?"
 
-**"Breached a private fact"** — trainee referenced Niseko / Tai Tam / HKD figures / the SYP gym / the uncle unprompted.
-*Coach:* Ivan told you nothing specific. The sim knows. Everything else you say from this turn on is through a suspicion filter.
+**Surface leak phrases (if Ivan's disclosure roll succeeds):** "yeah my mum actually had surgery last month", "a colleague of mine got hit with a massive drug bill"
 
-**"Freebie with a catch"** — trainee offered a free consultation but then rushed a pitch.
-*Coach:* the freebie helps only if the next thing feels like a continuation of the freebie — not the start of the pitch.
+**Correct pitch signals:** hospital indemnity, self-financed drug cover, diagnostic imaging, day-surgery cash, public-hospital top-up
+
+**Wrong pitches get soft-rejected:** critical illness, disability income, savings products, sports riders — "that's not really what's on my mind, more about normal hospital stuff la"
+
+**Why-superior line:** Unlike full private-hospital plans, fraction of premium, fixes the two real public-care gaps (drugs, imaging delays). Unlike group medical, it pays across jobs.
+
+### 2. Critical Shield — Critical illness, lump-sum
+
+**What Ivan is secretly worried about:** Uncle's stage-2 colorectal cancer (diagnosed 2 months ago); grandpa died of heart attack at 58; Ivan's recent borderline cholesterol result.
+
+**Trainee should probe:** "Any family health history?", "How were your checkup results?", "What if something serious happened at 30?", "Are you the main earner?"
+
+**Surface leak phrases:** "my uncle was actually just diagnosed with cancer", "my cholesterol came back a bit off recently"
+
+**Correct pitch signals:** critical illness, early-stage CI, lump-sum on diagnosis, cancer cover, multi-claim CI, "pays out on diagnosis"
+
+**Wrong pitches get soft-rejected:** hospital indemnity, outpatient cover, sports rider, savings — "my company plan's ok for day-to-day stuff. it's the big-scary-illness thing that's been on my mind"
+
+**Why-superior line:** Group medical pays the hospital, not the rent. Hospital indemnity covers the room, not the income. Only a lump sum closes the income-and-dignity gap during extended serious illness.
+
+### 3. Active Guard — Personal accident + sports
+
+**What Ivan is secretly worried about:** Rolled ankle 3 weeks ago playing basketball, HKD 4,800 out of pocket (group medical paid HKD 500); group medical explicitly excludes "off-duty sports injuries"; playing Mon/Wed weekly and not stopping.
+
+**Trainee should probe:** "Any sports injuries recently?", "Does your company plan cover weekend injuries?", "Ever surprised by a clinic bill?", "Does your group medical have an off-duty exclusion?"
+
+**Surface leak phrases:** "ngl i rolled my ankle last month, ended up paying most of it myself", "my group plan has this weird off-duty exclusion"
+
+**Correct pitch signals:** personal accident, sports injury rider, physio cover, fracture cash, amateur-sports cover, active-lifestyle plan
+
+**Wrong pitches get soft-rejected:** critical illness, savings, hospital indemnity without sports rider — "the big scary stuff is fine, it's the weekly weekend bumps that add up lol"
+
+**Why-superior line:** Group medical treats amateur sports injuries as "off-duty" and declines 80%+ of the bill. Hospital indemnity only kicks in on admission. This pays for the injury you'll actually have.
+
+### 4. Income Continuity — Disability income / wage replacement
+
+**What Ivan is secretly worried about:** Monthly transfer to his mum (never missed); a senior at his firm was off 5 months with burnout (group medical barely covered); Ivan has 2.5-month runway before savings collapse.
+
+**Trainee should probe:** "What would happen if you couldn't work for a year?", "Who's depending on you financially?", "How's your emergency runway?", "Ever seen someone take extended sick leave?"
+
+**Surface leak phrases:** "i actually send my mum a bit every month", "a guy at my firm was off for months last year, it got awkward"
+
+**Correct pitch signals:** disability income, income protection, wage replacement, salary continuation, "pays you monthly while you can't work"
+
+**Wrong pitches get soft-rejected:** hospital indemnity, CI-only lump sum, sports rider, savings — "that pays the hospital, my issue is more about what happens to me if i'm off work for 6 months"
+
+**Why-superior line:** Group medical pays the hospital. CI pays a one-time lump sum. Neither keeps rent paid for 9 months while you recover.
+
+### 5. Smart Start Saver — Savings-linked + small life cover
+
+**What Ivan is secretly worried about:** HKD 60k sitting in savings doing nothing; failed three times to build a saving habit; a uni friend is on a savings-linked plan and keeps saying he should look into it.
+
+**Trainee should probe:** "What do you do with your monthly savings?", "What does 'adulting financially' look like for you?", "Any idle cash you're not using?", "Thought about a first financial product?"
+
+**Surface leak phrases:** "ngl i've got some money just sitting there doing nothing", "a friend keeps telling me i should look at a savings plan"
+
+**Correct pitch signals:** savings-linked plan, endowment, structured saving, regular-contribution plan, "forced saving", first-financial-product
+
+**Wrong pitches get soft-rejected:** medical / CI / disability / sports — "health stuff isn't really where my head is. it's more the what-do-i-do-with-my-savings thing"
+
+**Why-superior line:** Savings account pays effectively nothing with no discipline mechanism. Pure investment is volatile and time-consuming. This gives habit + return floor + small protection in one product.
 
 ---
 
-## 7. Privacy breach reference (what NOT to mention unprompted)
+## The 25/75 disclosure mechanic
 
-These are private facts Ivan has in his head but has **not** shared. Mentioning them unprompted = severe breach, trust crashes.
+After any good-quality probing message, the server rolls a dice to decide whether Ivan leaks ONE essential surface-level backstory item:
 
-- Specific run venues (Tai Tam, Quarry Bay Reservoir)
-- The specific SYP indoor sports complex
-- Hokkaido / Niseko (generic "Japan" is fine)
-- Exact stats (78% NBA drop, 3 ankle sprains, 45GB data)
-- The friend's Niseko skiing injury
-- Specific HKD figures (savings, MPF balance, ski spending, the 4,800)
-- The uncle's cancer / stage-2 colorectal
-- The grandfather's heart attack at 58
-- The borderline-cholesterol result
-- His mum's gallbladder surgery
+- **Probe aligned with true cover area**: 75% leak chance
+- **Probe good quality but wrong cover area**: 25% leak chance (gives trainee a hook)
+- **Anything else**: no leak
 
-These are fine to mention **generically** ("young returnees often have suboptimal MPF", "sports injuries are usually excluded from group medical"). It's the *specific-to-Ivan* version that breaks the sim.
+When leaking, Ivan drops **one essential fact only** — no elaboration, no adjacent details. The trainee has to follow up to get more.
+
+Deep backstory items (see `[deep_1]`, `[deep_2]`, `[deep_3]` in `src/covers.js`) are gated behind trust ≥ 60 AND discovery_level ≥ 3.
 
 ---
 
-## 8. Debrief reading order
+## Exit-intent recovery rules
 
-The debrief payload contains four distinct LLM assessments. Read them in this order in the workshop:
+When Ivan says anything matching the exit-intent regex ("not interested", "I'll pass", "bye", "leave it", "not for me", etc.), the state machine flips to `EXIT_INTENT_EXPRESSED`. The seller has **one recovery turn**. It counts as valid if ALL of:
 
-1. **Product-fit review** (`needDiscovery`) — did the seller identify and address Ivan's actual need? This is the main learning of v3.
-2. **Hook → insurance transition** (`transition`) — was it earned, or did insurance drop in from nowhere?
-3. **Key moments** (`keyMoments`) — 2–4 notable turns worth replaying.
-4. **Exemplar bridge** (`exemplarBridge`) — one good version of how the transition could have read, specifically for the product type this Ivan needed.
+1. Acknowledges the objection (sorry / understand / fair enough / noted / hear you)
+2. Does NOT push another pitch ("but maybe", "one more thing", "just before you go")
+3. Is at least 20 characters (not just "ok" or "sure")
+
+Invalid recovery → `failed_exit_intent`. Valid recovery → state goes `RECOVERY_PENDING` until Ivan responds. Second exit intent after recovery → terminate. Only ONE recovery attempt per session.
 
 ---
 
-## 9. Running a workshop
+## Grounding rules
 
-A typical 60-min slot:
-- **5 min** — intro, explain the premise (do NOT mention archetypes or needs exist)
-- **15 min** — first round (trainees pair up, one plays seller one observes; run until outcome)
-- **10 min** — self-debrief + HTML download of own log
-- **15 min** — second round (swap roles)
-- **10 min** — facilitator pulls full admin export, picks 2–3 sessions to discuss with the room, using this cheatsheet for the reveal
+Ivan is instructed to NEVER:
+- Thank for offers the seller didn't make (free trials, discounts, bonuses)
+- Quote prices the seller didn't state
+- Reference product names or links the seller didn't send
+- Contradict anything he said earlier in the conversation
 
-*Tip:* save the archetype + insurance need reveal for the very end of each debrief. The "oh that's why he wouldn't engage" moment is the lesson.
+If he does, the validator (regex + LLM) catches it and the server regenerates with a tightening instruction. If regen also fails, Ivan falls back to "hmm, can you clarify what you mean".
+
+---
+
+## Common trainee failure modes
+
+| Failure | What trainees do | What Ivan does | How to coach |
+|---|---|---|---|
+| **Surveillance feel** | Reference specific private facts (Tai Tam, Niseko, 45GB) | Severe breach reaction, trust crash | Use INFERRED/categorical phrasing only |
+| **Insurance on turn 1** | Lead with "we have a plan for you" | 90% walk probability | Earn the right — probe first |
+| **Wrong cover pitch** | Pitch CI when Ivan's fit is medical | Soft reject, small score penalty | Listen for which area Ivan engages with |
+| **Wrong cover close** | Try to close the wrong pitch | `failed_missold` | Align pitch BEFORE closing |
+| **Unfocused** | Generic "insurance" talk through stage 3 | `failed_unfocused` | Commit to ONE specific product type |
+| **Didn't acknowledge exit** | Push after "not interested" | `failed_exit_intent` | Sincere acknowledgment, no re-pitch |
+| **Ignored 3x** | Long, off-topic messages (esp. Slammed archetype) | `failed_ignored` | Short, specific, relevant |
+
+---
+
+## Privacy-breach reference (SEVERE — instant trust crash)
+
+| Phrase | Why |
+|---|---|
+| "Tai Tam", "Quarry Bay Reservoir" | Specific run venue |
+| "Sai Ying Pun sports complex", "indoor sports complex" | Specific gym |
+| "Hokkaido", "Niseko" | Specific ski destination (Japan alone is fine) |
+| "78%", exact NBA stats | Exact behavioural data |
+| "Saturday 7am", "Mon/Wed evening" | Exact schedule |
+| "HKD 80,000", specific 4+ digit amounts | Specific financial figures |
+
+**Fine to say:** "active lifestyle", "weekend sports", "returnee from UK", "young professional in Central", "running takes a toll on knees", "sports injuries are often excluded from group medical" — anything categorical or hypothetical.
+
+---
+
+## Suggested workshop run sheet
+
+1. **Opener (5 min)** — brief the framing, warn trainees that Ivan is a composite, the simulator assigns a hidden combination each time.
+2. **Round 1 (15 min)** — each trainee runs 1 session. Debrief together, focus on the cover reveal and the discovery-vs-pitch-fit scores.
+3. **Deep-dive (10 min)** — walk through one `failed_missold` case if anyone hit it. If nobody did, force one (volunteer takes a session and deliberately pitches wrong).
+4. **Round 2 (15 min)** — each trainee runs another session, trying to improve their discovery score.
+5. **Facilitator review (10 min)** — pull the HTML facilitator log (`/api/admin/log?token=...`), compare discovery scores and outcome patterns across the group.
+6. **Wrap (5 min)** — the 2–3 reusable principles: probe before you pitch, commit to ONE product type, acknowledge exit intent without pushing.
+
+---
+
+## Dry-run checklist (before the workshop)
+
+- [ ] Run at least 10 sessions to see a spread of archetype × cover combinations
+- [ ] Deliberately force a `failed_missold` — probe wrong area, close on the wrong pitch
+- [ ] Deliberately force a `failed_exit_intent` — have Ivan say "not interested" and try to push through
+- [ ] Test a session that actually succeeds on each of the 5 covers
+- [ ] Verify `/facilitator?token=...` loads with your `ADMIN_TOKEN`
+- [ ] Verify `/api/admin/log?token=...` produces a readable HTML log of all sessions
+- [ ] Verify per-session HTML reports download properly at session end
+
+---
+
+## Sanity: what a good session looks like
+
+- Stage 1: 3–5 turns, no insurance mention, hook references a categorical observation ("young professionals in Central often…"), Ivan engages cautiously.
+- Stage 2: 4–7 turns, 2–3 probing questions, ideally at least one aligned with the true cover's topic area. Ivan leaks ONE surface item. Trainee builds on it.
+- Stage 3: 4–7 turns, specific pitch matching the surfaced concern, price/features discussed, Ivan asks clarifying questions, eventually asks for link/agent.
+- Total: ~15–20 turns.
+- Debrief: transition 7/10+, discovery 7/10+, pitch-fit 8/10+, outcome `success`.

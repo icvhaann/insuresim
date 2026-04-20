@@ -1,8 +1,13 @@
-// app.js
-// Client-side logic for InsureSim v3.
-// All prompt construction lives on the server. This file only manages state, UI, and HTTP.
-// v3 adds: hidden insurance-need layer (MI vs CI), discovery tracking, wrong-product-close
-// detection, and HTML log download (fetched from server instead of built client-side).
+// app.js — InsureSim v4 client
+//
+// Changes vs v3:
+//   • 5-cover state (probedDirections is an array of cover keys)
+//   • Server is source of truth for sessionState; client mirrors it
+//   • Exit-intent-driven hard termination (state machine terminal outcomes)
+//   • Tracks revealedFacts (tags the server signals back in resp.disclosedFact)
+//   • Terminal outcomes include new failed_exit_intent
+//
+// All prompt construction is server-side. This file manages UI state + HTTP.
 
 'use strict';
 
@@ -31,16 +36,23 @@ const STAGE_ADVANCE_TURN = { 1: 3,  2: 4,  3: 5  };
 const STAGE_LABELS       = { 1: 'Hook', 2: 'Cultivate', 3: 'Convert' };
 const MAX_IGNORES        = 3;
 
+// Session states (mirror of src/stateMachine.js — kept in sync)
+const SS = {
+  NORMAL: 'normal',
+  EXIT_INTENT_EXPRESSED: 'exit_intent_expressed',
+  RECOVERY_PENDING: 'recovery_pending',
+  RECOVERED: 'recovered',
+  TERMINATED: 'terminated',
+};
+
 // ── State ──────────────────────────────────────────────────
 let sessionId, currentStage, history, transcript;
 let psych, memory;
 let stageTurnCount, stageScoreAccum, perStageScores;
 let totalTurns, consecutiveIgnores;
 let sessionEnded, insuranceMentionTurn;
-// v3 additions
-let discoveryLevel;       // 0..5 — aligned-probe counter, reveals backstory progressively
-let latestSpecificPitch;  // 'medical' | 'critical_illness' | 'both' | null
-let wrongCloseCount;      // number of times seller has tried to close the wrong product type
+let discoveryLevel, latestSpecificPitch, wrongCloseCount;
+let sessionState, exitIntentCount, revealedFacts;
 
 resetState();
 
@@ -51,11 +63,10 @@ function resetState() {
   transcript = [];
   psych = { trust: 50, skepticism: 38, creepiness: 0, engagement: 15, scamSuspicion: 0 };
   memory = {
-    sports: [], injuries: false, jobConfirmed: false, insuranceGap: false,
-    friendStory: false, priceAsked: false, coverageAsked: [],
+    sports: [], injuries: false, jobConfirmed: false,
+    priceAsked: false, coverageAsked: [],
     freebieOffered: false, legitimacyChallenged: false,
-    // v3 — insurance-need-layer memory flags (populated from server signals, not keywords)
-    miProbed: false, ciProbed: false, wrongPitchedOnce: false,
+    probedDirections: [], wrongPitchedOnce: false,
   };
   stageTurnCount = 0;
   stageScoreAccum = 0;
@@ -67,6 +78,9 @@ function resetState() {
   discoveryLevel = 0;
   latestSpecificPitch = null;
   wrongCloseCount = 0;
+  sessionState = SS.NORMAL;
+  exitIntentCount = 0;
+  revealedFacts = [];
 }
 
 // ── Sidebar toggle ─────────────────────────────────────────
@@ -83,7 +97,7 @@ sidebarOverlay.addEventListener('click', () => {
   sidebarOverlay.classList.remove('visible');
 });
 
-// ── Splash → start session ─────────────────────────────────
+// ── Splash ─────────────────────────────────────────────────
 splashStart.addEventListener('click', startSession);
 
 async function startSession() {
@@ -97,9 +111,7 @@ async function startSession() {
     });
     const data = await r.json();
     if (data?.initialPsych) psych = { ...psych, ...data.initialPsych };
-  } catch (e) {
-    console.error('Session start failed:', e);
-  }
+  } catch (e) { console.error('Session start failed:', e); }
   fetch('/api/warmup').catch(() => {});
   pip('pip1').classList.add('active');
   inputEl.focus();
@@ -108,20 +120,14 @@ async function startSession() {
 // ── Send ────────────────────────────────────────────────────
 sendBtn.addEventListener('click', sendMessage);
 inputEl.addEventListener('keydown', e => {
-  if (e.key === 'Enter' && !e.shiftKey) {
-    e.preventDefault();
-    sendMessage();
-  }
+  if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendMessage(); }
 });
 
 async function sendMessage() {
   if (sessionEnded) return;
   const text = inputEl.value.trim();
   if (!text) return;
-  if (text.length > 2000) {
-    showSystemMsg('Message too long (max 2000 chars).');
-    return;
-  }
+  if (text.length > 2000) { showSystemMsg('Message too long (max 2000 chars).'); return; }
 
   inputEl.value = '';
   inputEl.disabled = true;
@@ -142,35 +148,18 @@ async function sendMessage() {
         sessionId,
         stage: currentStage,
         userMessage: text,
-        history,
-        psych,
-        memory,
-        totalTurns,
-        insuranceMentionTurn,
-        // v3 fields
-        discoveryLevel,
-        latestSpecificPitch,
-        wrongCloseCount,
+        history, psych, memory,
+        totalTurns, insuranceMentionTurn,
+        discoveryLevel, latestSpecificPitch, wrongCloseCount,
+        sessionState, exitIntentCount,
+        revealedFacts,
       })
     });
-    if (r.status === 429) {
-      typing.remove();
-      showSystemMsg('Slow down — try again in a moment.');
-      reEnableInput();
-      return;
-    }
-    if (!r.ok) {
-      typing.remove();
-      showSystemMsg('Something went wrong on the server. Try again.');
-      reEnableInput();
-      return;
-    }
+    if (r.status === 429) { typing.remove(); showSystemMsg('Slow down — try again in a moment.'); reEnableInput(); return; }
+    if (!r.ok)            { typing.remove(); showSystemMsg('Something went wrong on the server. Try again.'); reEnableInput(); return; }
     resp = await r.json();
   } catch (e) {
-    typing.remove();
-    showSystemMsg('Network error. Try again.');
-    reEnableInput();
-    return;
+    typing.remove(); showSystemMsg('Network error. Try again.'); reEnableInput(); return;
   }
   typing.remove();
 
@@ -181,16 +170,32 @@ async function sendMessage() {
   updateMemoryFromSignals(resp);
   if (resp.insuranceMention && !insuranceMentionTurn) insuranceMentionTurn = totalTurns;
 
-  // v3: update latest specific pitch (server is source of truth on what was specific)
-  if (resp.effectivePitchType) latestSpecificPitch = resp.effectivePitchType;
-  // v3: increment discovery whenever the seller probed the ALIGNED topic area
+  if (resp.effectivePitchType && resp.effectivePitchType !== 'multiple' && resp.effectivePitchType !== 'generic') {
+    latestSpecificPitch = resp.effectivePitchType;
+  }
   if (resp.discoveryIncrement) discoveryLevel = Math.min(5, discoveryLevel + resp.discoveryIncrement);
-  // v3: count wrong-product close attempts
   if (resp.wrongCloseAttempt) wrongCloseCount += 1;
+
+  // v4: track revealed facts (server tags them)
+  if (resp.disclosedFact) revealedFacts.push(resp.disclosedFact);
+
+  // v4: mirror session state from server
+  if (resp.sessionState) sessionState = resp.sessionState;
+  if (resp.ivanExitIntent) exitIntentCount += 1;
 
   updatePsychFromSignals(resp);
 
-  // ── Walk-away ──────────────────────────────────────────
+  // ── v4: hard terminate if state machine says so ────────
+  if (resp.terminate && resp.terminalOutcome) {
+    if (resp.reply) {
+      addMessageBubble('bot', resp.reply);
+      history.push({ role: 'assistant', content: resp.reply });
+      transcript.push({ role: 'ivan', content: resp.reply });
+    }
+    return endSessionWith(resp.terminalOutcome, resp.terminalReason || 'Session terminated.');
+  }
+
+  // ── Walk-away (insurance-too-early dice) ──────────────
   if (resp.walked) {
     if (resp.walkPresentation === 'cold_reply' && resp.reply) {
       addMessageBubble('bot', resp.reply);
@@ -226,42 +231,30 @@ async function sendMessage() {
   addStageScore(resp.score ?? 5);
   updateScorePanel();
 
-  // ── Outcome detection from Ivan's reply ──
-  if (resp.optOut) {
-    return endSessionWith('failed_optout', 'Ivan asked to be removed from contact.');
-  }
+  // ── Outcome checks ──
+  if (resp.optOut) return endSessionWith('failed_optout', 'Ivan asked to be removed from contact.');
 
-  // v3: seller kept trying to close the WRONG product — hard fail on the second attempt
+  // Second wrong-close attempt is terminal
   if (wrongCloseCount >= 2) {
-    return endSessionWith(
-      'failed_missold',
-      "Ivan disengaged after you tried to close on the wrong product type twice."
-    );
+    return endSessionWith('failed_missold', "Ivan disengaged after you tried to close on the wrong product type twice.");
   }
 
-  // v3: Ivan's close-signal. Branch on whether the latest specific pitch aligned
-  // with the hidden need. The server tells us this directly so the client never
-  // needs to know the need itself.
-  const ivanReadyToClose =
-    resp.ivanClose ||
+  // Ivan's close signal
+  const ivanReadyToClose = resp.ivanClose ||
     (resp.legitimacy?.type === 'human_handoff' && currentStage === 3 && psych.trust >= 55);
   if (ivanReadyToClose) {
     if (resp.latestSpecificPitchAligned === true) {
-      return endSessionWith(
-        'success',
-        'Ivan asked to be connected / for the link — and the product you landed on matches his actual need.'
-      );
+      return endSessionWith('success', 'Ivan asked for the link / agent — and the product you landed on matches his actual need.');
     }
     if (resp.latestSpecificPitchAligned === false) {
-      return endSessionWith(
-        'failed_missold',
-        "Ivan agreed — but the product you were pitching wasn't the one that actually matches his concern."
-      );
+      return endSessionWith('failed_missold', "Ivan agreed — but the product you were pitching wasn't the one that matches his concern.");
     }
-    return endSessionWith(
-      'failed_unfocused',
-      "Ivan said yes — but you never pitched a specific product type, so it's unclear what he agreed to."
-    );
+    return endSessionWith('failed_unfocused', "Ivan said yes — but you never pitched a specific product type, so it's unclear what he agreed to.");
+  }
+
+  // Visual indicator if exit intent was just expressed (give seller a visible cue that they have ONE recovery turn)
+  if (sessionState === SS.EXIT_INTENT_EXPRESSED) {
+    showSystemMsg('Ivan expressed exit intent. You have ONE recovery turn — acknowledge, don\'t push.');
   }
 
   reEnableInput();
@@ -277,24 +270,21 @@ function updateMemoryFromUser(text) {
   if (/\b(run|jog|trail)\b/.test(m) && !memory.sports.includes('running'))                                 memory.sports.push('running');
   if (/\b(injur|sprain|hurt|knee|ankle|broken|broke)\b/.test(m))                                           memory.injuries = true;
   if (/\b(consultant|consulting|finance|tech|job|work|career|central)\b/.test(m))                          memory.jobConfirmed = true;
-  if (/\b(coverage|cover|insurance|protect|gap|policy)\b/.test(m))                                         memory.insuranceGap = true;
   if (/\b(price|cost|hkd|month|premium)\b/.test(m))                                                        memory.priceAsked = true;
   if (/\b(exclude|exclusion|claim|payout|compare)\b/.test(m))                                              memory.coverageAsked.push(m.slice(0, 50));
   if (/\b(free|complimentary|no\s*cost|no\s*charge|trial|on\s*us|waive)\b/.test(m))                        memory.freebieOffered = true;
 }
 
-// ── Memory updates from server-side signals (v3) ──────────
-// Server tells us the seller's probe direction + pitch type without telling us
-// the hidden need. We mirror those into memory flags so Ivan sees them in his
-// conversation_memory block.
 function updateMemoryFromSignals(resp) {
   if (!resp) return;
-  if (resp.probeDirection === 'medical'          || resp.probeDirection === 'both') memory.miProbed = true;
-  if (resp.probeDirection === 'critical_illness' || resp.probeDirection === 'both') memory.ciProbed = true;
+  if (resp.probeDirection && resp.probeDirection !== 'neutral' && resp.probeDirection !== 'multiple') {
+    if (!memory.probedDirections.includes(resp.probeDirection)) {
+      memory.probedDirections.push(resp.probeDirection);
+    }
+  }
   if (resp.wrongPitch) memory.wrongPitchedOnce = true;
 }
 
-// ── Psych updates from server signals ──────────────────────
 function updatePsychFromSignals(resp) {
   const q  = resp.quality || 'neutral';
   const sb = !!resp.severeBreach;
@@ -313,10 +303,7 @@ function updatePsychFromSignals(resp) {
   if (inMention && currentStage <= 2) { psych.skepticism += 8; psych.engagement -= 6; }
 
   if (memory.freebieOffered) psych.engagement = clamp(psych.engagement + 2, 0, 100);
-
   if (resp.legitimacy?.type) memory.legitimacyChallenged = true;
-
-  // Mild creepiness decay when seller does well
   if (q === 'good' && psych.creepiness > 30) psych.creepiness -= 3;
 
   psych.trust         = clamp(psych.trust, 0, 100);
@@ -329,10 +316,8 @@ function updatePsychFromSignals(resp) {
 const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 
-// ── Score panel + stage progression ────────────────────────
-function addStageScore(score) {
-  stageScoreAccum += score;
-}
+// ── Score + stage progression ──────────────────────────────
+function addStageScore(score) { stageScoreAccum += score; }
 
 function updateScorePanel() {
   const avg = stageTurnCount > 0 ? (stageScoreAccum / stageTurnCount).toFixed(1) : '\u2014';
@@ -351,20 +336,17 @@ function updateScorePanel() {
 }
 
 function checkStageProgression() {
+  // v4: block advancement while state-machine is in non-normal state
+  if (sessionState === SS.EXIT_INTENT_EXPRESSED || sessionState === SS.RECOVERY_PENDING) return;
+
   const minTurns = STAGE_ADVANCE_TURN[currentStage];
   const needed = STAGE_PASS_ACCUM[currentStage];
   const maxTurns = STAGE_MAX_TURNS[currentStage];
 
-  if (stageTurnCount >= minTurns && stageScoreAccum >= needed) {
-    advanceStage();
-    return;
-  }
+  if (stageTurnCount >= minTurns && stageScoreAccum >= needed) { advanceStage(); return; }
   if (stageTurnCount >= maxTurns) {
-    if (stageScoreAccum >= needed * 0.7) {
-      advanceStage();
-    } else {
-      endSessionWith('failed_stage', `Stage ${currentStage} ended without enough engagement to advance.`);
-    }
+    if (stageScoreAccum >= needed * 0.7) advanceStage();
+    else endSessionWith('failed_stage', `Stage ${currentStage} ended without enough engagement to advance.`);
   }
 }
 
@@ -372,12 +354,11 @@ function advanceStage() {
   perStageScores.push({
     stage: currentStage,
     avg: parseFloat((stageScoreAccum / stageTurnCount).toFixed(1)),
-    total: stageScoreAccum,
-    turns: stageTurnCount
+    total: stageScoreAccum, turns: stageTurnCount
   });
 
   if (currentStage === 3) {
-    return endSessionWith('success', 'You completed all three stages with strong engagement.');
+    return endSessionWith('failed_unfocused', "You reached the end of stage 3 without Ivan asking for the link or the agent. The conversation didn't close.");
   }
 
   pip(`pip${currentStage}`).classList.remove('active');
@@ -407,8 +388,7 @@ async function endSessionWith(outcome, summary) {
     perStageScores.push({
       stage: currentStage,
       avg: parseFloat((stageScoreAccum / stageTurnCount).toFixed(1)),
-      total: stageScoreAccum,
-      turns: stageTurnCount
+      total: stageScoreAccum, turns: stageTurnCount
     });
   }
 
@@ -418,7 +398,7 @@ async function endSessionWith(outcome, summary) {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         sessionId, outcome,
-        finalState: { stage: currentStage, psych, memory, totalTurns, insuranceMentionTurn }
+        finalState: { stage: currentStage, psych, memory, totalTurns, insuranceMentionTurn, revealedFacts },
       })
     });
   } catch {}
@@ -440,19 +420,20 @@ async function endSessionWith(outcome, summary) {
 
 function outcomeTitle(o) {
   return ({
-    success:          'Closed \u2014 right product, link / agent requested',
-    failed_missold:   'Mis-sold \u2014 wrong product closed',
-    failed_unfocused: 'Closed without a specific product',
-    walked:           'Ivan walked away',
-    failed_optout:    'Ivan asked to opt out',
-    failed_ignored:   'Ivan stopped responding',
-    failed_stage:     'Stage failed'
+    success:            'Closed \u2014 link / agent requested on the correct product',
+    walked:             'Ivan walked away',
+    failed_optout:      'Ivan asked to opt out',
+    failed_ignored:     'Ivan stopped responding',
+    failed_stage:       'Stage failed',
+    failed_missold:     'Mis-sold \u2014 wrong product for Ivan',
+    failed_unfocused:   'Unfocused \u2014 no specific product was pitched',
+    failed_exit_intent: 'Exit intent \u2014 recovery failed',
   })[o] || 'Session ended';
 }
 
 function outcomeIcon(o) {
   if (o === 'success')          return '\u2713';
-  if (o === 'failed_unfocused') return '!';
+  if (o === 'failed_unfocused') return '?';
   if (o === 'failed_stage')     return '!';
   return '\u2717';
 }
@@ -499,12 +480,8 @@ function showDebriefOverlay(outcome, summary, debrief) {
       perStageScores.forEach(s => {
         const row = document.createElement('div');
         row.className = 'debrief-stage-row';
-        const name = document.createElement('div');
-        name.className = 'stage-name';
-        name.textContent = `Stage ${s.stage}`;
-        const score = document.createElement('div');
-        score.className = 'stage-score';
-        score.textContent = `avg ${s.avg.toFixed(1)} \u00b7 ${s.turns} turns`;
+        const name = document.createElement('div'); name.className = 'stage-name'; name.textContent = `Stage ${s.stage}`;
+        const score = document.createElement('div'); score.className = 'stage-score'; score.textContent = `avg ${s.avg.toFixed(1)} \u00b7 ${s.turns} turns`;
         row.append(name, score);
         wrap.appendChild(row);
       });
@@ -512,7 +489,7 @@ function showDebriefOverlay(outcome, summary, debrief) {
     }));
   }
 
-  // v3 — main learning of this iteration: did the seller identify the need and pitch right?
+  // ── v4: product-fit review ───────────────────────────
   if (debrief?.needDiscovery) {
     overlay.appendChild(makeSection('Product-fit review', () => {
       const nd = debrief.needDiscovery;
@@ -521,61 +498,43 @@ function showDebriefOverlay(outcome, summary, debrief) {
       const scoreRow = document.createElement('div');
       scoreRow.className = 'needfit-scores';
       const mk = (lbl, val) => {
-        const cell = document.createElement('div');
-        cell.className = 'needfit-cell';
-        const l = document.createElement('div');
-        l.className = 'needfit-label';
-        l.textContent = lbl;
-        const v = document.createElement('div');
-        v.className = 'needfit-val';
-        v.textContent = val == null ? '\u2014' : `${val}/10`;
-        cell.append(l, v);
-        return cell;
+        const cell = document.createElement('div'); cell.className = 'needfit-cell';
+        const l = document.createElement('div'); l.className = 'needfit-label'; l.textContent = lbl;
+        const v = document.createElement('div'); v.className = 'needfit-val'; v.textContent = val == null ? '\u2014' : `${val}/10`;
+        cell.append(l, v); return cell;
       };
       scoreRow.append(mk('Discovery', nd.discovery_score), mk('Pitch fit', nd.pitch_fit_score));
       wrap.appendChild(scoreRow);
-      const addLine = (label, text) => {
-        if (!text) return;
-        const p = document.createElement('div');
-        p.className = 'needfit-line';
-        const strong = document.createElement('strong');
-        strong.textContent = label + ' ';
-        p.append(strong, document.createTextNode(text));
+      if (nd.coaching_note) {
+        const p = document.createElement('div'); p.className = 'needfit-line'; p.textContent = nd.coaching_note;
         wrap.appendChild(p);
-      };
-      addLine('Summary.',               nd.summary);
-      addLine("What Ivan signalled.",   nd.what_ivan_signalled);
-      addLine('What the seller pitched.', nd.what_seller_pitched);
-      addLine('Coaching note.',         nd.coaching_note);
+      }
       return wrap;
     }));
   }
 
-  if (debrief?.insuranceNeed) {
-    overlay.appendChild(makeSection("Ivan's real insurance need this session", () => {
+  // ── v4: cover reveal with full card ───────────────────
+  if (debrief?.cover) {
+    overlay.appendChild(makeSection("Ivan's real cover fit this session", () => {
       const wrap = document.createElement('div');
       wrap.className = 'debrief-need';
-      const name = document.createElement('div');
-      name.className = 'a-name';
-      name.textContent = debrief.insuranceNeed.name;
-      const desc = document.createElement('div');
-      desc.className = 'a-desc';
-      desc.textContent = debrief.insuranceNeed.description;
-      wrap.append(name, desc);
+      const name = document.createElement('div'); name.className = 'a-name'; name.textContent = debrief.cover.shortName;
+      const oneLiner = document.createElement('div'); oneLiner.className = 'a-desc'; oneLiner.textContent = debrief.cover.oneLiner;
+      wrap.append(name, oneLiner);
+      if (debrief.cover.need?.summary) {
+        const p = document.createElement('div'); p.className = 'a-desc'; p.style.marginTop = '6px';
+        p.textContent = 'Need: ' + debrief.cover.need.summary;
+        wrap.appendChild(p);
+      }
       return wrap;
     }));
   }
 
   if (debrief?.transition && debrief.transition.score != null) {
     overlay.appendChild(makeSection('Transition naturalness (hook \u2192 insurance)', () => {
-      const wrap = document.createElement('div');
-      wrap.className = 'debrief-transition';
-      const score = document.createElement('div');
-      score.className = 'ts-score';
-      score.textContent = `${debrief.transition.score}/10`;
-      const rationale = document.createElement('div');
-      rationale.className = 'ts-rationale';
-      rationale.textContent = debrief.transition.rationale || '';
+      const wrap = document.createElement('div'); wrap.className = 'debrief-transition';
+      const score = document.createElement('div'); score.className = 'ts-score'; score.textContent = `${debrief.transition.score}/10`;
+      const rationale = document.createElement('div'); rationale.className = 'ts-rationale'; rationale.textContent = debrief.transition.rationale || '';
       wrap.append(score, rationale);
       return wrap;
     }));
@@ -585,17 +544,10 @@ function showDebriefOverlay(outcome, summary, debrief) {
     overlay.appendChild(makeSection('Key moments', () => {
       const wrap = document.createElement('div');
       debrief.keyMoments.forEach(m => {
-        const block = document.createElement('div');
-        block.className = 'debrief-moment';
-        const h = document.createElement('div');
-        h.className = 'm-headline';
-        h.textContent = `Turn ${m.turn} \u2014 ${m.headline || ''}`;
-        const w = document.createElement('div');
-        w.className = 'm-what';
-        w.textContent = m.what_happened || '';
-        const l = document.createElement('div');
-        l.className = 'm-lesson';
-        l.textContent = m.lesson || '';
+        const block = document.createElement('div'); block.className = 'debrief-moment';
+        const h = document.createElement('div'); h.className = 'm-headline'; h.textContent = `Turn ${m.turn} \u2014 ${m.headline || ''}`;
+        const w = document.createElement('div'); w.className = 'm-what'; w.textContent = m.what_happened || '';
+        const l = document.createElement('div'); l.className = 'm-lesson'; l.textContent = m.lesson || '';
         block.append(h, w, l);
         wrap.appendChild(block);
       });
@@ -605,14 +557,9 @@ function showDebriefOverlay(outcome, summary, debrief) {
 
   if (debrief?.archetype) {
     overlay.appendChild(makeSection('Persona this session', () => {
-      const wrap = document.createElement('div');
-      wrap.className = 'debrief-archetype';
-      const name = document.createElement('div');
-      name.className = 'a-name';
-      name.textContent = debrief.archetype.name;
-      const desc = document.createElement('div');
-      desc.className = 'a-desc';
-      desc.textContent = debrief.archetype.description;
+      const wrap = document.createElement('div'); wrap.className = 'debrief-archetype';
+      const name = document.createElement('div'); name.className = 'a-name'; name.textContent = debrief.archetype.name;
+      const desc = document.createElement('div'); desc.className = 'a-desc'; desc.textContent = debrief.archetype.description;
       wrap.append(name, desc);
       return wrap;
     }));
@@ -620,8 +567,7 @@ function showDebriefOverlay(outcome, summary, debrief) {
 
   if (debrief?.exemplarBridge) {
     overlay.appendChild(makeSection('How a strong bridge could have read', () => {
-      const wrap = document.createElement('div');
-      wrap.className = 'debrief-exemplar';
+      const wrap = document.createElement('div'); wrap.className = 'debrief-exemplar';
       wrap.textContent = debrief.exemplarBridge;
       return wrap;
     }));
@@ -630,12 +576,10 @@ function showDebriefOverlay(outcome, summary, debrief) {
   const actions = document.createElement('div');
   actions.className = 'debrief-actions';
   const dl = document.createElement('button');
-  dl.className = 'download-btn';
-  dl.textContent = '\u2193 Download report (HTML)';
+  dl.className = 'download-btn'; dl.textContent = '\u2193 Download report (HTML)';
   dl.addEventListener('click', downloadLog);
   const restart = document.createElement('button');
-  restart.className = 'restart-btn';
-  restart.textContent = 'Start a new session';
+  restart.className = 'restart-btn'; restart.textContent = 'Start a new session';
   restart.addEventListener('click', restartSession);
   actions.append(dl, restart);
   overlay.appendChild(actions);
@@ -645,13 +589,9 @@ function showDebriefOverlay(outcome, summary, debrief) {
 }
 
 function makeSection(heading, contentFn) {
-  const sec = document.createElement('div');
-  sec.className = 'debrief-section';
-  const h = document.createElement('div');
-  h.className = 'debrief-h';
-  h.textContent = heading;
-  sec.appendChild(h);
-  sec.appendChild(contentFn());
+  const sec = document.createElement('div'); sec.className = 'debrief-section';
+  const h = document.createElement('div'); h.className = 'debrief-h'; h.textContent = heading;
+  sec.appendChild(h); sec.appendChild(contentFn());
   return sec;
 }
 
@@ -676,32 +616,20 @@ function restartSession() {
   startSession();
 }
 
-// ── Download log ───────────────────────────────────────────
-// v3: log is rendered as HTML server-side (richer — includes judge outputs,
-// archetype/need reveal, and a proper printable format). The sessionId in the
-// URL is already an unguessable random secret.
 function downloadLog() {
   const a = document.createElement('a');
-  a.href = `/api/session/log?sessionId=${encodeURIComponent(sessionId)}`;
+  a.href = `/api/session/report.html?sessionId=${encodeURIComponent(sessionId)}`;
   a.download = `insuresim-${sessionId}.html`;
   a.rel = 'noopener';
-  document.body.appendChild(a);
-  a.click();
-  document.body.removeChild(a);
+  document.body.appendChild(a); a.click(); document.body.removeChild(a);
 }
 
 // ── DOM helpers ────────────────────────────────────────────
 function addMessageBubble(side, text) {
-  const wrap = document.createElement('div');
-  wrap.className = `msg ${side === 'bot' ? 'bot' : 'user'}`;
-  const av = document.createElement('div');
-  av.className = 'msg-av';
-  av.textContent = side === 'bot' ? '\uD83C\uDFC0' : '\uD83D\uDC64';
-  const body = document.createElement('div');
-  body.className = 'msg-body';
-  const bubble = document.createElement('div');
-  bubble.className = 'msg-bubble';
-  bubble.textContent = text;
+  const wrap = document.createElement('div'); wrap.className = `msg ${side === 'bot' ? 'bot' : 'user'}`;
+  const av = document.createElement('div'); av.className = 'msg-av'; av.textContent = side === 'bot' ? '\uD83C\uDFC0' : '\uD83D\uDC64';
+  const body = document.createElement('div'); body.className = 'msg-body';
+  const bubble = document.createElement('div'); bubble.className = 'msg-bubble'; bubble.textContent = text;
   body.appendChild(bubble);
   wrap.append(av, body);
   messagesEl.appendChild(wrap);
@@ -709,41 +637,28 @@ function addMessageBubble(side, text) {
 }
 
 function addReadIgnoredHint() {
-  const hint = document.createElement('div');
-  hint.className = 'read-ignored-hint';
+  const hint = document.createElement('div'); hint.className = 'read-ignored-hint';
   const t = new Date();
   hint.textContent = `Read ${String(t.getHours()).padStart(2,'0')}:${String(t.getMinutes()).padStart(2,'0')} \u00b7 No reply`;
-  messagesEl.appendChild(hint);
-  scrollToBottom();
+  messagesEl.appendChild(hint); scrollToBottom();
 }
 
 function addTypingIndicator() {
-  const wrap = document.createElement('div');
-  wrap.className = 'msg bot';
-  const av = document.createElement('div');
-  av.className = 'msg-av';
-  av.textContent = '\uD83C\uDFC0';
-  const body = document.createElement('div');
-  body.className = 'msg-body';
-  const bubble = document.createElement('div');
-  bubble.className = 'msg-bubble';
-  const typing = document.createElement('div');
-  typing.className = 'typing';
+  const wrap = document.createElement('div'); wrap.className = 'msg bot';
+  const av = document.createElement('div'); av.className = 'msg-av'; av.textContent = '\uD83C\uDFC0';
+  const body = document.createElement('div'); body.className = 'msg-body';
+  const bubble = document.createElement('div'); bubble.className = 'msg-bubble';
+  const typing = document.createElement('div'); typing.className = 'typing';
   for (let i = 0; i < 3; i++) typing.appendChild(document.createElement('span'));
-  bubble.appendChild(typing);
-  body.appendChild(bubble);
-  wrap.append(av, body);
-  messagesEl.appendChild(wrap);
-  scrollToBottom();
+  bubble.appendChild(typing); body.appendChild(bubble);
+  wrap.append(av, body); messagesEl.appendChild(wrap); scrollToBottom();
   return wrap;
 }
 
 function showSystemMsg(text) {
-  const hint = document.createElement('div');
-  hint.className = 'read-ignored-hint';
+  const hint = document.createElement('div'); hint.className = 'read-ignored-hint';
   hint.textContent = text;
-  messagesEl.appendChild(hint);
-  scrollToBottom();
+  messagesEl.appendChild(hint); scrollToBottom();
 }
 
 function updateIgnoreCounter() {
@@ -757,9 +672,7 @@ function updateIgnoreCounter() {
 
 function reEnableInput() {
   if (sessionEnded) return;
-  inputEl.disabled = false;
-  sendBtn.disabled = false;
-  inputEl.focus();
+  inputEl.disabled = false; sendBtn.disabled = false; inputEl.focus();
 }
 
 function scrollToBottom() {
