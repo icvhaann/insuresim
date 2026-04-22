@@ -47,6 +47,13 @@ if (!DEEPSEEK_API_KEY) {
   process.exit(1);
 }
 
+// Demo mode: volatile in-memory Set of sessionIds that have demo activated.
+// - Written by /api/admin/demo/toggle (facilitator only).
+// - Read during /api/chat to apply demo parameters.
+// - Cleared on /api/session/end (one-shot, auto-disarms).
+// - NEVER written to any audit log or session record.
+const demoSessions = new Set();
+
 app.set('trust proxy', 1);
 app.use(express.json({ limit: '64kb' }));
 app.use(express.static(join(__dirname, 'public')));
@@ -115,6 +122,10 @@ app.post('/api/chat', async (req, res) => {
   const recoveryAttempted = inExitIntentState;
   const recoveryEval = recoveryAttempted ? evaluateRecoveryAttempt(userMsg) : { valid: false };
 
+  // ── Demo mode — check before any game logic runs ─────────
+  // demoSessions is a volatile in-memory Set; not logged anywhere.
+  const isDemo = demoSessions.has(sessionId);
+
   // ── Latest specific pitch tracking (for wrong-close detection)
   let effectivePitchType = latestSpecificPitch || null;
   if (pitchType && pitchType !== 'generic' && pitchType !== 'multiple') {
@@ -123,8 +134,14 @@ app.post('/api/chat', async (req, res) => {
     effectivePitchType = 'multiple';
   }
 
-  const wrongPitch = pitchType && pitchType !== 'generic' && pitchType !== 'multiple' && pitchType !== coverKey;
-  const wrongCloseAttempt = sellerClosing
+  // In demo mode, stage 3: auto-align pitch to the true cover so the CEO's close
+  // attempt always registers as correct — even if he said "insurance" generically.
+  if (isDemo && stage >= 3 && (insuranceNow || insuranceMentionTurn)) {
+    effectivePitchType = coverKey;
+  }
+
+  const wrongPitch = !isDemo && pitchType && pitchType !== 'generic' && pitchType !== 'multiple' && pitchType !== coverKey;
+  const wrongCloseAttempt = !isDemo && sellerClosing
     && effectivePitchType
     && effectivePitchType !== 'generic'
     && effectivePitchType !== 'multiple'
@@ -137,10 +154,10 @@ app.post('/api/chat', async (req, res) => {
     latestSpecificPitchAligned = effectivePitchType === coverKey;
   }
 
-  // ── Insurance walk-away dice roll
+  // ── Insurance walk-away dice roll (suppressed in demo mode)
   let walkAway = false;
   let walkPresentation = null;
-  if (insuranceNow && !insuranceMentionTurn) {
+  if (!isDemo && insuranceNow && !insuranceMentionTurn) {
     const turnIdx = (totalTurns || 0) + 1;
     const pWalk = insuranceWalkProbability(turnIdx, psych?.trust ?? 50);
     if (Math.random() < pWalk) {
@@ -149,7 +166,7 @@ app.post('/api/chat', async (req, res) => {
     }
   }
 
-  // ── WALK-AWAY overlay-only short-circuit
+  // ── WALK-AWAY overlay-only short-circuit (only in normal mode)
   if (walkAway && walkPresentation === 'overlay_only') {
     logTurn(sessionId, {
       turn: (totalTurns || 0) + 1, stage,
@@ -181,10 +198,10 @@ app.post('/api/chat', async (req, res) => {
   const shouldJudge = severe.length === 0 && privateRefs.length === 0
     && userMsg.length > 60 && adjacentRe.test(userMsg);
 
-  // ── Quality + disclosure permission + turn instruction
+  // ── Quality + disclosure permission + turn instruction (all demo-aware)
   const quality = preScoreMessage(userMsg, stage, insuranceNow, coverKey);
   const disclosurePermission = computeDisclosurePermission({
-    stage, quality, probeAligned, probeAdjacent,
+    stage, quality, probeAligned, probeAdjacent, demoMode: isDemo,
   });
   const turnInstruction = getTurnInstruction({
     stage, quality, psych: psych || {},
@@ -192,6 +209,7 @@ app.post('/api/chat', async (req, res) => {
     walkAway, totalTurns: totalTurns || 0,
     wrongPitch, wrongCloseAttempt,
     sessionState,
+    demoMode: isDemo,
   });
 
   const system = buildSystemPrompt({
@@ -205,6 +223,7 @@ app.post('/api/chat', async (req, res) => {
     disclosurePermission,
     revealedFacts: revealedFacts || [],
     sessionState,
+    demoMode: isDemo,
   });
 
   const messages = [
@@ -387,8 +406,8 @@ DO NOT acknowledge, thank for, or reference anything the seller has NOT literall
     exitIntentCount: exitIntentCount || 0,
   });
 
-  // ── Score
-  const score = scoreTurn({
+  // ── Score (demo mode: +2 bonus to help clear stage thresholds)
+  const rawScore = scoreTurn({
     userMsg, ivanReply: reply, stage, quality,
     signals: {
       severeBreach: severe[0] || judgeBreachDetected,
@@ -401,6 +420,7 @@ DO NOT acknowledge, thank for, or reference anything the seller has NOT literall
       wrongClose: wrongCloseAttempt,
     },
   });
+  const score = isDemo ? Math.min(10, rawScore + 2) : rawScore;
 
   // ── Audit log
   logTurn(sessionId, {
@@ -459,6 +479,8 @@ app.post('/api/session/end', (req, res) => {
   const { sessionId, outcome, finalState } = req.body || {};
   if (!sessionId) return res.status(400).json({ error: 'Invalid sessionId.' });
   endSession(sessionId, outcome, finalState);
+  // Demo mode auto-disarms when the session ends — no carryover to the next session.
+  demoSessions.delete(sessionId);
   res.json({ ok: true });
 });
 
@@ -523,7 +545,37 @@ app.get('/api/admin/log.json', (req, res) => {
 app.get('/api/admin/log', (req, res) => {
   if (!ADMIN_TOKEN) return res.status(503).send('Admin export disabled.');
   if (req.query.token !== ADMIN_TOKEN) return res.status(401).send('Unauthorized.');
-  res.set('Content-Type', 'text/html; charset=utf-8').send(renderAllSessionsPage(exportAll()));
+  // Pass current demo session IDs so the log page can render button state correctly.
+  res.set('Content-Type', 'text/html; charset=utf-8')
+     .send(renderAllSessionsPage(exportAll(), [...demoSessions]));
+});
+
+// ─── Demo mode toggle (facilitator only) ─────────────────────
+// POST /api/admin/demo/toggle  { sessionId, token }
+// Toggles demo mode on/off for a specific active session.
+// - Only works on sessions that exist and have not yet ended.
+// - Auto-disarms when the session ends (see /api/session/end).
+// - Nothing is written to the audit log — volatile in-memory only (Q4b).
+app.post('/api/admin/demo/toggle', (req, res) => {
+  if (!ADMIN_TOKEN) return res.status(503).json({ error: 'Admin disabled — set ADMIN_TOKEN.' });
+  const { sessionId, token } = req.body || {};
+  if (token !== ADMIN_TOKEN) return res.status(401).json({ error: 'Unauthorized.' });
+  if (!sessionId || typeof sessionId !== 'string') {
+    return res.status(400).json({ error: 'sessionId required.' });
+  }
+  const s = getSession(sessionId);
+  if (!s) return res.status(404).json({ error: 'Session not found.' });
+  if (s.endedAt) return res.status(400).json({ error: 'Session already ended — demo mode has no effect.' });
+
+  if (demoSessions.has(sessionId)) {
+    demoSessions.delete(sessionId);
+    console.log(`[demo] OFF for ${sessionId}`);
+    return res.json({ ok: true, demoActive: false });
+  } else {
+    demoSessions.add(sessionId);
+    console.log(`[demo] ON  for ${sessionId}`);
+    return res.json({ ok: true, demoActive: true });
+  }
 });
 
 // Per-session HTML (trainee download)

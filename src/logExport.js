@@ -190,40 +190,138 @@ ${baseStyle()}
 </div>`;
 }
 
-export function renderAllSessionsPage(sessions) {
+// demoSessionIds: array of sessionIds currently in demo mode (from server's demoSessions Set)
+export function renderAllSessionsPage(sessions, demoSessionIds = []) {
+  const demoSet = new Set(demoSessionIds);
+
   const rows = (sessions || []).map(s => {
-    const meta = OUTCOME_META[s.outcome] || {};
-    const cover = s.debrief?.cover?.shortName || s.coverKey || '—';
+    const meta     = OUTCOME_META[s.outcome] || {};
+    const cover    = s.debrief?.cover?.shortName || s.coverKey || '—';
+    const isActive = !s.endedAt;
     const duration = s.endedAt && s.startedAt
       ? Math.round((s.endedAt - s.startedAt) / 60000) + ' min'
-      : '—';
-    return `<tr>
-      <td class="mono">${esc(s.sessionId || '')}</td>
+      : isActive ? '<span style="color:#2ba566;font-weight:500;">● live</span>' : '—';
+    const isDemoOn = demoSet.has(s.sessionId);
+
+    // Last seller message + last Ivan reply — helps facilitator identify the CEO's row
+    const lastSellerTurn = [...(s.turns || [])].reverse().find(t => t.userMessage);
+    const lastIvanTurn   = [...(s.turns || [])].reverse().find(t => t.reply);
+    const lastSeller = lastSellerTurn ? esc(String(lastSellerTurn.userMessage).slice(0, 55)) + '…' : '<em style="color:#aaa;">—</em>';
+    const lastIvan   = lastIvanTurn   ? esc(String(lastIvanTurn.reply).slice(0, 55)) + '…'        : '<em style="color:#aaa;">—</em>';
+
+    // Demo button — only shown for active sessions
+    const demoCell = isActive
+      ? `<button
+           class="demo-btn${isDemoOn ? ' demo-on' : ''}"
+           onclick="toggleDemo('${esc(s.sessionId)}',this)"
+           title="${isDemoOn ? 'Demo mode is ON for this session — click to turn off' : 'Activate demo mode for this session'}"
+         >${isDemoOn ? '🎯 Demo ON' : '🎯 Demo'}</button>`
+      : '<span style="color:#ccc;font-size:11px;">ended</span>';
+
+    return `<tr class="${isActive ? 'row-active' : 'row-ended'}">
+      <td class="mono" style="font-size:11px;max-width:130px;overflow:hidden;text-overflow:ellipsis;">${esc(s.sessionId || '')}</td>
       <td>${esc(s.archetypeKey || '—')}</td>
       <td>${esc(cover)}</td>
-      <td style="color:${meta.color || '#666'};">${esc(s.outcome || '—')}</td>
-      <td>${esc(String(s.turns?.length || 0))}</td>
-      <td>${esc(duration)}</td>
-      <td><a href="/api/session/report.html?sessionId=${encodeURIComponent(s.sessionId)}">view</a></td>
+      <td style="color:${meta.color || '#666'};">${esc(s.outcome || (isActive ? 'in progress' : '—'))}</td>
+      <td style="text-align:center;">${esc(String(s.turns?.length || 0))}</td>
+      <td>${duration}</td>
+      <td style="font-size:11px;max-width:200px;">
+        <div><span style="color:#2c5aa0;font-size:10px;">SELLER:</span> ${lastSeller}</div>
+        <div><span style="color:#555;font-size:10px;">IVAN:</span> ${lastIvan}</div>
+      </td>
+      <td><a href="/api/session/report.html?sessionId=${encodeURIComponent(s.sessionId)}" style="font-size:12px;">view</a></td>
+      <td>${demoCell}</td>
     </tr>`;
   }).join('');
 
   return `<!doctype html><meta charset="utf-8"><title>InsureSim — facilitator log</title>
 ${baseStyle()}
+<style>
+.demo-btn{background:#f0f2f5;border:1px solid #d0d4da;border-radius:5px;cursor:pointer;font-size:12px;padding:4px 10px;color:#444;transition:background .15s,border-color .15s}
+.demo-btn:hover{background:#eef5ff;border-color:#2c5aa0;color:#2c5aa0}
+.demo-btn.demo-on{background:#2ba566;border-color:#2ba566;color:#fff;font-weight:600}
+.demo-btn.demo-on:hover{background:#239158}
+.row-active td{background:#fffff8}
+.demo-legend{font-size:12px;color:#666;margin-top:8px;padding:8px 12px;background:#fffff0;border:1px solid #e8e0a0;border-radius:5px;display:inline-block}
+tr{transition:background .2s}
+</style>
 <div class="report">
   <h1>InsureSim — Facilitator Log</h1>
   <div class="meta">${(sessions || []).length} sessions in memory (capped at 200, cleared on restart)</div>
-  <table style="width:100%;border-collapse:collapse;font-size:13px;">
+  <div class="demo-legend">🎯 <strong>Demo mode:</strong> Click the Demo button on an active session row to make Ivan more receptive from the next turn onwards. Auto-clears when the session ends. Identify the right session by reading the last message preview.</div>
+  <table style="width:100%;border-collapse:collapse;font-size:13px;margin-top:14px;">
     <thead><tr style="background:#f0f2f5;">
-      <th style="text-align:left;padding:8px;">Session</th>
+      <th style="text-align:left;padding:8px;min-width:100px;">Session</th>
       <th style="text-align:left;padding:8px;">Archetype</th>
       <th style="text-align:left;padding:8px;">True cover</th>
       <th style="text-align:left;padding:8px;">Outcome</th>
-      <th style="text-align:left;padding:8px;">Turns</th>
-      <th style="text-align:left;padding:8px;">Duration</th>
-      <th></th>
+      <th style="text-align:center;padding:8px;">Turns</th>
+      <th style="text-align:left;padding:8px;">Time</th>
+      <th style="text-align:left;padding:8px;min-width:200px;">Last messages</th>
+      <th style="padding:8px;"></th>
+      <th style="padding:8px;min-width:100px;">Demo</th>
     </tr></thead>
-    <tbody>${rows || '<tr><td colspan="7" style="text-align:center;padding:20px;color:#888;">No sessions</td></tr>'}</tbody>
+    <tbody>${rows || '<tr><td colspan="9" style="text-align:center;padding:20px;color:#888;">No sessions yet</td></tr>'}</tbody>
   </table>
-</div>`;
+</div>
+<script>
+// Facilitator Demo Toggle — uses ADMIN_TOKEN from the URL query string.
+// This JS runs in the facilitator's browser only. Token is already in the URL.
+async function toggleDemo(sessionId, btn) {
+  const token = new URLSearchParams(window.location.search).get('token');
+  btn.disabled = true;
+  btn.textContent = '...';
+  try {
+    const r = await fetch('/api/admin/demo/toggle', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ sessionId, token }),
+    });
+    const data = await r.json();
+    if (!r.ok || !data.ok) {
+      btn.disabled = false;
+      btn.textContent = 'Error';
+      btn.style.background = '#fee';
+      setTimeout(() => {
+        btn.style.background = '';
+        btn.textContent = '🎯 Demo';
+      }, 2000);
+      console.error('Demo toggle failed:', data);
+      return;
+    }
+    if (data.demoActive) {
+      btn.textContent = '🎯 Demo ON';
+      btn.classList.add('demo-on');
+      btn.title = 'Demo mode is ON for this session — click to turn off';
+    } else {
+      btn.textContent = '🎯 Demo';
+      btn.classList.remove('demo-on');
+      btn.title = 'Activate demo mode for this session';
+    }
+    btn.disabled = false;
+  } catch (err) {
+    btn.disabled = false;
+    btn.textContent = '🎯 Demo';
+    console.error('Network error:', err);
+  }
+}
+
+// Auto-refresh every 30s so new sessions appear and last-message previews update.
+// Preserves demo button state (server is the source of truth on next load).
+let refreshTimer = setInterval(() => {
+  window.location.reload();
+}, 30000);
+
+// Pause refresh if user is hovering over a Demo button (avoids interrupting a toggle)
+document.addEventListener('mouseover', e => {
+  if (e.target.classList.contains('demo-btn')) {
+    clearInterval(refreshTimer);
+  }
+});
+document.addEventListener('mouseout', e => {
+  if (e.target.classList.contains('demo-btn')) {
+    refreshTimer = setInterval(() => window.location.reload(), 30000);
+  }
+});
+</script>`;
 }
